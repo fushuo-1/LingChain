@@ -10,12 +10,14 @@ This MCP server provides tools for LLM-controlled STM32 development:
 """
 
 import json
+import subprocess
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 from mcp_server.utils.ioc_parser import parse_ioc, get_chip_series, get_chip_target
-from mcp_server.utils.project_scanner import scan_project, format_scan_result
+from mcp_server.utils.project_scanner import scan_project
+from mcp_server.utils.toolchain_manager import generate_toolchain_content
 
 mcp = FastMCP("lingchain-mcp")
 
@@ -94,14 +96,60 @@ def init(project_dir: str) -> str:
 def configure(project_dir: str, preset: str = "Debug") -> str:
     """Configure CMake build system for STM32 project.
 
+    Runs cmake --preset to generate the build directory and cache.
+    Validates that CMakePresets.json exists and the preset is valid.
+
     Args:
         project_dir: Path to STM32 project directory
         preset: CMake preset name (Debug/Release)
 
     Returns:
-        Build directory path and configuration result
+        JSON string with build directory path and configuration result
     """
-    return f"[configure] Placeholder - will run cmake --preset {preset} in {project_dir}"
+    project_path = Path(project_dir).resolve()
+    presets_file = project_path / "CMakePresets.json"
+
+    if not presets_file.exists():
+        return json.dumps({
+            "success": False,
+            "error": f"CMakePresets.json not found in {project_dir}",
+        }, indent=2, ensure_ascii=False)
+
+    try:
+        result = subprocess.run(
+            ["cmake", "--preset", preset],
+            cwd=project_path,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        # Determine build directory from preset
+        build_dir = project_path / "build" / preset
+
+        response = {
+            "success": result.returncode == 0,
+            "preset": preset,
+            "build_dir": str(build_dir),
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+        }
+
+        if result.returncode != 0:
+            response["error"] = result.stderr.strip() or "CMake configuration failed"
+
+        return json.dumps(response, indent=2, ensure_ascii=False)
+
+    except subprocess.TimeoutExpired:
+        return json.dumps({
+            "success": False,
+            "error": "CMake configuration timed out (120s)",
+        }, indent=2, ensure_ascii=False)
+    except FileNotFoundError:
+        return json.dumps({
+            "success": False,
+            "error": "cmake not found in PATH. Please install CMake.",
+        }, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()

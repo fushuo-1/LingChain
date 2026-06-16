@@ -22,14 +22,14 @@ class ProjectScanResult:
     """Result of scanning a project directory."""
 
     project_dir: Path
-    ioc_file: Optional[Path] = None
-    cmake_lists: Optional[Path] = None
-    cmake_presets: Optional[Path] = None
-    toolchain_file: Optional[Path] = None
-    linker_script: Optional[Path] = None
-    startup_file: Optional[Path] = None
-    core_dir: Optional[Path] = None
-    drivers_dir: Optional[Path] = None
+    ioc_file: Path | None = None
+    cmake_lists: Path | None = None
+    cmake_presets: Path | None = None
+    toolchain_file: Path | None = None
+    linker_script: Path | None = None
+    startup_file: Path | None = None
+    core_dir: Path | None = None
+    drivers_dir: Path | None = None
     toolchain_status: list[ToolchainStatus] = field(default_factory=list)
     is_valid: bool = False
     errors: list[str] = field(default_factory=list)
