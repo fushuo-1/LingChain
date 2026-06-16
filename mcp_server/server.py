@@ -10,6 +10,7 @@ This MCP server provides tools for LLM-controlled STM32 development:
 """
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -156,14 +157,94 @@ def configure(project_dir: str, preset: str = "Debug") -> str:
 def build(project_dir: str, preset: str = "Debug") -> str:
     """Build STM32 project using CMake.
 
+    Runs cmake --build --preset to compile the project.
+    Parses compiler output to extract errors and warnings with file locations.
+
     Args:
         project_dir: Path to STM32 project directory
         preset: CMake preset name (Debug/Release)
 
     Returns:
-        Build result with errors, warnings, and output paths
+        JSON string with build result: success, errors, warnings, output paths
     """
-    return f"[build] Placeholder - will compile {project_dir} with preset {preset}"
+    project_path = Path(project_dir).resolve()
+    build_dir = project_path / "build" / preset
+
+    if not build_dir.exists():
+        return json.dumps({
+            "success": False,
+            "error": f"Build directory not found: {build_dir}. Run configure first.",
+        }, indent=2, ensure_ascii=False)
+
+    try:
+        result = subprocess.run(
+            ["cmake", "--build", "--preset", preset],
+            cwd=project_path,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
+        # Parse errors and warnings from compiler output
+        errors = []
+        warnings = []
+        # GCC error/warning patterns: file:line:col: severity: message
+        error_pattern = re.compile(r"^(.+?):(\d+):(\d+):\s*error:\s*(.+)$", re.MULTILINE)
+        warning_pattern = re.compile(r"^(.+?):(\d+):(\d+):\s*warning:\s*(.+)$", re.MULTILINE)
+
+        combined = result.stdout + result.stderr
+        for match in error_pattern.finditer(combined):
+            errors.append({
+                "file": match.group(1),
+                "line": int(match.group(2)),
+                "column": int(match.group(3)),
+                "message": match.group(4),
+            })
+
+        for match in warning_pattern.finditer(combined):
+            warnings.append({
+                "file": match.group(1),
+                "line": int(match.group(2)),
+                "column": int(match.group(3)),
+                "message": match.group(4),
+            })
+
+        # Find output files
+        elf_files = list(build_dir.rglob("*.elf"))
+        hex_files = list(build_dir.rglob("*.hex"))
+        bin_files = list(build_dir.rglob("*.bin"))
+
+        response = {
+            "success": result.returncode == 0,
+            "preset": preset,
+            "build_dir": str(build_dir),
+            "errors": errors,
+            "warnings": warnings,
+            "error_count": len(errors),
+            "warning_count": len(warnings),
+            "outputs": {
+                "elf": str(elf_files[0]) if elf_files else None,
+                "hex": str(hex_files[0]) if hex_files else None,
+                "bin": str(bin_files[0]) if bin_files else None,
+            },
+            "stdout": result.stdout.strip()[-2000:] if result.stdout else "",
+        }
+
+        if result.returncode != 0:
+            response["error"] = f"Build failed with {len(errors)} error(s) and {len(warnings)} warning(s)"
+
+        return json.dumps(response, indent=2, ensure_ascii=False)
+
+    except subprocess.TimeoutExpired:
+        return json.dumps({
+            "success": False,
+            "error": "Build timed out (300s)",
+        }, indent=2, ensure_ascii=False)
+    except FileNotFoundError:
+        return json.dumps({
+            "success": False,
+            "error": "cmake not found in PATH. Please install CMake.",
+        }, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
