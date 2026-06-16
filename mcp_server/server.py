@@ -293,12 +293,166 @@ def analyze(
 ) -> str:
     """Analyze STM32 firmware (size, symbols, memory map).
 
+    Runs arm-none-eabi-size or arm-none-eabi-nm on the compiled ELF.
+    Provides memory usage breakdown and symbol size analysis.
+
     Args:
         project_dir: Path to STM32 project directory
         preset: CMake preset name (Debug/Release)
         type: Analysis type (size/symbols/map)
 
     Returns:
-        Analysis result with size breakdown or symbol info
+        JSON string with analysis results
     """
-    return f"[analyze] Placeholder - will analyze {project_dir} firmware ({type})"
+    project_path = Path(project_dir).resolve()
+    build_dir = project_path / "build" / preset
+
+    # Find ELF file
+    elf_files = list(build_dir.rglob("*.elf"))
+    if not elf_files:
+        return json.dumps({
+            "success": False,
+            "error": f"No .elf file found in {build_dir}. Run build first.",
+        }, indent=2, ensure_ascii=False)
+
+    elf_path = elf_files[0]
+
+    try:
+        if type == "size":
+            # Run arm-none-eabi-size
+            result = subprocess.run(
+                ["arm-none-eabi-size", "-A", str(elf_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                return json.dumps({
+                    "success": False,
+                    "error": result.stderr.strip() or "size analysis failed",
+                }, indent=2, ensure_ascii=False)
+
+            # Parse size output
+            sections = []
+            total_flash = 0
+            total_ram = 0
+            for line in result.stdout.strip().split("\n"):
+                parts = line.split()
+                if len(parts) >= 3 and parts[0] != "section":
+                    section_name = parts[0]
+                    size = int(parts[1])
+                    if section_name in (".text", ".rodata", ".isr_vector"):
+                        total_flash += size
+                    elif section_name in (".data", ".bss", ".heap", ".stack"):
+                        total_ram += size
+                    sections.append({
+                        "name": section_name,
+                        "size": size,
+                        "addr": int(parts[2]) if len(parts) > 2 else 0,
+                    })
+
+            return json.dumps({
+                "success": True,
+                "elf": str(elf_path),
+                "sections": sections,
+                "summary": {
+                    "flash": total_flash,
+                    "ram": total_ram,
+                },
+            }, indent=2, ensure_ascii=False)
+
+        elif type == "symbols":
+            # Run arm-none-eabi-nm for symbol sizes
+            result = subprocess.run(
+                ["arm-none-eabi-nm", "--size-sort", "--print-size", str(elf_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                return json.dumps({
+                    "success": False,
+                    "error": result.stderr.strip() or "symbol analysis failed",
+                }, indent=2, ensure_ascii=False)
+
+            # Parse nm output and sort by size
+            symbols = []
+            for line in result.stdout.strip().split("\n"):
+                parts = line.split()
+                if len(parts) >= 4:
+                    try:
+                        size = int(parts[1], 16)
+                        symbols.append({
+                            "size": size,
+                            "type": parts[2],
+                            "name": parts[3],
+                        })
+                    except ValueError:
+                        continue
+
+            # Sort by size descending, return top 20
+            symbols.sort(key=lambda s: s["size"], reverse=True)
+            top_symbols = symbols[:20]
+
+            return json.dumps({
+                "success": True,
+                "elf": str(elf_path),
+                "symbols": top_symbols,
+                "total_symbols": len(symbols),
+            }, indent=2, ensure_ascii=False)
+
+        elif type == "map":
+            # Read .map file
+            map_files = list(build_dir.rglob("*.map"))
+            if not map_files:
+                return json.dumps({
+                    "success": False,
+                    "error": "No .map file found in build directory",
+                }, indent=2, ensure_ascii=False)
+
+            map_path = map_files[0]
+            map_content = map_path.read_text(encoding="utf-8", errors="ignore")
+
+            # Extract memory configuration from map file
+            memory_config = {}
+            # Look for Memory Configuration section
+            in_memory_section = False
+            for line in map_content.split("\n"):
+                if "Memory Configuration" in line:
+                    in_memory_section = True
+                elif in_memory_section and line.strip().startswith("Name"):
+                    continue
+                elif in_memory_section and line.strip() and not line.startswith(" "):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        memory_config[parts[0]] = {
+                            "origin": int(parts[1], 16),
+                            "length": int(parts[2], 16),
+                            "attributes": parts[3],
+                        }
+                elif in_memory_section and not line.strip():
+                    in_memory_section = False
+
+            return json.dumps({
+                "success": True,
+                "elf": str(elf_path),
+                "map_file": str(map_path),
+                "memory_config": memory_config,
+            }, indent=2, ensure_ascii=False)
+
+        else:
+            return json.dumps({
+                "success": False,
+                "error": f"Unknown analysis type: {type}. Use size/symbols/map.",
+            }, indent=2, ensure_ascii=False)
+
+    except subprocess.TimeoutExpired:
+        return json.dumps({
+            "success": False,
+            "error": "Analysis timed out",
+        }, indent=2, ensure_ascii=False)
+    except FileNotFoundError as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Tool not found: {e}. Please install arm-none-eabi toolchain.",
+        }, indent=2, ensure_ascii=False)
