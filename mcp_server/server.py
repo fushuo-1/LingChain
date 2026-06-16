@@ -255,15 +255,120 @@ def flash(
 ) -> str:
     """Flash firmware to STM32 target via OpenOCD.
 
+    Builds OpenOCD command from chip series and probe interface.
+    Programs the .elf file and validates write.
+
     Args:
         project_dir: Path to STM32 project directory
         preset: CMake preset name (Debug/Release)
         interface: Debug probe interface (stlink/jlink/cmsis-dap)
 
     Returns:
-        Flash result with success/failure status
+        JSON string with flash result
     """
-    return f"[flash] Placeholder - will flash {project_dir} via {interface}"
+    project_path = Path(project_dir).resolve()
+    build_dir = project_path / "build" / preset
+
+    # Find ELF / HEX file
+    elf_files = list(build_dir.rglob("*.elf"))
+    if not elf_files:
+        hex_files = list(build_dir.rglob("*.hex"))
+        bin_files = list(build_dir.rglob("*.bin"))
+        target_file = None
+        if hex_files:
+            target_file = hex_files[0]
+        elif bin_files:
+            target_file = bin_files[0]
+        if not target_file:
+            return json.dumps({
+                "success": False,
+                "error": "No firmware file (.elf/.hex/.bin) found. Run build first.",
+            }, indent=2, ensure_ascii=False)
+    else:
+        target_file = elf_files[0]
+
+    # Determine chip target from .ioc
+    ioc_files = list(project_path.glob("*.ioc"))
+    chip_target = "stm32g0x"  # default fallback
+    if ioc_files:
+        try:
+            ioc_config = parse_ioc(ioc_files[0])
+            chip_target = get_chip_target(ioc_config.mcu_name)
+        except (FileNotFoundError, ValueError):
+            pass
+
+    # Determine interface config
+    interface_map = {
+        "stlink": "interface/stlink-v2-1.cfg",
+        "stlink-v3": "interface/stlink-v3.cfg",
+        "jlink": "interface/jlink.cfg",
+        "cmsis-dap": "interface/cmsis-dap.cfg",
+    }
+    interface_cfg = interface_map.get(interface, "interface/stlink-v2-1.cfg")
+
+    # Build OpenOCD command
+    target_ext = target_file.suffix.lower()
+    program_args = {
+        ".elf": str(target_file),
+        ".hex": str(target_file),
+        ".bin": f"{target_file} 0x08000000",
+    }
+    program_arg = program_args.get(target_ext, str(target_file))
+
+    openocd_cmd = [
+        "openocd",
+        "-f", interface_cfg,
+        "-f", f"target/{chip_target}.cfg",
+        "-c", f"program {program_arg} verify reset exit",
+    ]
+
+    try:
+        result = subprocess.run(
+            openocd_cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+
+        response = {
+            "success": result.returncode == 0,
+            "interface": interface,
+            "chip_target": chip_target,
+            "firmware": str(target_file),
+            "stdout": stdout[-2000:] if stdout else "",
+            "stderr": stderr[-2000:] if stderr else "",
+        }
+
+        if result.returncode != 0:
+            # Determine specific error type
+            if "Error: open failed" in stdout + stderr:
+                response["error_type"] = "connection_failed"
+                response["error"] = "Cannot connect to target. Check probe connection and power."
+            elif "verify failed" in stdout + stderr:
+                response["error_type"] = "verify_failed"
+                response["error"] = "Verify failed after programming."
+            elif "timeout" in stdout + stderr.lower():
+                response["error_type"] = "timeout"
+                response["error"] = "Communication timeout."
+            else:
+                response["error_type"] = "unknown"
+                response["error"] = stderr[-500:] or stdout[-500:]
+
+        return json.dumps(response, indent=2, ensure_ascii=False)
+
+    except subprocess.TimeoutExpired:
+        return json.dumps({
+            "success": False,
+            "error": "OpenOCD timed out (60s)",
+        }, indent=2, ensure_ascii=False)
+    except FileNotFoundError:
+        return json.dumps({
+            "success": False,
+            "error": "openocd not found in PATH. Please install OpenOCD.",
+        }, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
