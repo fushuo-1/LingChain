@@ -9,7 +9,13 @@ This MCP server provides tools for LLM-controlled STM32 development:
 - analyze:   Analyze firmware size/symbols
 """
 
+import json
+from pathlib import Path
+
 from mcp.server.fastmcp import FastMCP
+
+from mcp_server.utils.ioc_parser import parse_ioc, get_chip_series, get_chip_target
+from mcp_server.utils.project_scanner import scan_project, format_scan_result
 
 mcp = FastMCP("lingchain-mcp")
 
@@ -18,13 +24,70 @@ mcp = FastMCP("lingchain-mcp")
 def init(project_dir: str) -> str:
     """Initialize STM32 CMake project by scanning .ioc file and checking toolchain.
 
+    Scans the project directory for STM32CubeMX configuration (.ioc file),
+    extracts chip model and HAL library info, and checks toolchain availability.
+
     Args:
         project_dir: Path to STM32CubeMX generated project directory
 
     Returns:
-        Project summary with chip info and toolchain status
+        JSON string with project summary: chip info, toolchain status, project structure
     """
-    return f"[init] Placeholder - will scan {project_dir} for STM32CubeMX project"
+    project_path = Path(project_dir).resolve()
+
+    # Scan project structure and toolchain
+    scan_result = scan_project(project_path)
+
+    # Parse .ioc if available
+    ioc_info = None
+    if scan_result.ioc_file:
+        try:
+            ioc_config = parse_ioc(scan_result.ioc_file)
+            ioc_info = {
+                "mcu_name": ioc_config.mcu_name,
+                "mcu_family": ioc_config.mcu_family,
+                "mcu_package": ioc_config.mcu_package,
+                "chip_series": get_chip_series(ioc_config.mcu_name),
+                "chip_target": get_chip_target(ioc_config.mcu_name),
+                "hal_version": ioc_config.hal_version,
+                "project_name": ioc_config.project_name,
+                "toolchain": ioc_config.toolchain,
+                "c_standard": ioc_config.c_standard,
+                "heap_size": ioc_config.heap_size,
+                "stack_size": ioc_config.stack_size,
+                "defines": ioc_config.defines,
+            }
+        except (FileNotFoundError, ValueError) as e:
+            scan_result.errors.append(f"Failed to parse .ioc: {e}")
+
+    # Build toolchain status
+    toolchain_status = {
+        ts.name: {
+            "available": ts.available,
+            "version": ts.version,
+            "path": ts.path,
+            "error": ts.error,
+        }
+        for ts in scan_result.toolchain_status
+    }
+
+    # Build response
+    response = {
+        "project_dir": str(project_path),
+        "valid": scan_result.is_valid,
+        "ioc": ioc_info,
+        "toolchain": toolchain_status,
+        "structure": {
+            "cmake_lists": str(scan_result.cmake_lists) if scan_result.cmake_lists and scan_result.cmake_lists.exists() else None,
+            "cmake_presets": str(scan_result.cmake_presets) if scan_result.cmake_presets and scan_result.cmake_presets.exists() else None,
+            "toolchain_file": str(scan_result.toolchain_file) if scan_result.toolchain_file else None,
+            "linker_script": str(scan_result.linker_script) if scan_result.linker_script else None,
+            "startup_file": str(scan_result.startup_file) if scan_result.startup_file else None,
+        },
+        "errors": scan_result.errors,
+    }
+
+    return json.dumps(response, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
