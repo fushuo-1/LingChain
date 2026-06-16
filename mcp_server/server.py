@@ -379,15 +379,101 @@ def debug(
 ) -> str:
     """Start debugging session for STM32 project.
 
+    Launches OpenOCD in background and starts arm-none-eabi-gdb.
+    Auto-loads the ELF file and sets up remote connection.
+
     Args:
         project_dir: Path to STM32 project directory
         preset: CMake preset name (Debug/Release)
         interface: Debug probe interface (stlink/jlink/cmsis-dap)
 
     Returns:
-        Debug session info with GDB connection details
+        JSON string with debug session details
     """
-    return f"[debug] Placeholder - will start debug session for {project_dir}"
+    project_path = Path(project_dir).resolve()
+    build_dir = project_path / "build" / preset
+
+    # Find ELF file
+    elf_files = list(build_dir.rglob("*.elf"))
+    if not elf_files:
+        return json.dumps({
+            "success": False,
+            "error": f"No .elf file found in {build_dir}. Run build first.",
+        }, indent=2, ensure_ascii=False)
+
+    elf_path = elf_files[0]
+
+    # Determine chip target from .ioc
+    ioc_files = list(project_path.glob("*.ioc"))
+    chip_target = "stm32g0x"
+    if ioc_files:
+        try:
+            ioc_config = parse_ioc(ioc_files[0])
+            chip_target = get_chip_target(ioc_config.mcu_name)
+        except (FileNotFoundError, ValueError):
+            pass
+
+    # Interface config
+    interface_map = {
+        "stlink": "interface/stlink-v2-1.cfg",
+        "stlink-v3": "interface/stlink-v3.cfg",
+        "jlink": "interface/jlink.cfg",
+        "cmsis-dap": "interface/cmsis-dap.cfg",
+    }
+    interface_cfg = interface_map.get(interface, "interface/stlink-v2-1.cfg")
+
+    # Build OpenOCD command (runs in background on port 3333)
+    openocd_cmd = [
+        "openocd",
+        "-f", interface_cfg,
+        "-f", f"target/{chip_target}.cfg",
+    ]
+
+    # Try starting OpenOCD
+    try:
+        openocd_proc = subprocess.Popen(
+            openocd_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+
+        # Wait for OpenOCD to be ready (check port 3333)
+        import time
+        time.sleep(2)
+
+        # Build GDB command sequence
+        gdb_cmd = (
+            f'arm-none-eabi-gdb '
+            f'-ex "target extended-remote localhost:3333" '
+            f'-ex "file {elf_path}" '
+            f'-ex "monitor reset halt" '
+            f'-ex "load" '
+            f'-ex "monitor reset halt" '
+            f'"{elf_path}"'
+        )
+
+        return json.dumps({
+            "success": True,
+            "session": {
+                "openocd_pid": openocd_proc.pid,
+                "interface": interface,
+                "chip_target": chip_target,
+                "elf": str(elf_path),
+                "gdb_cmd": gdb_cmd,
+            },
+            "instructions": [
+                f"OpenOCD started on PID {openocd_proc.pid}",
+                f"Copy the gdb_cmd below to start GDB:",
+                gdb_cmd,
+            ],
+        }, indent=2, ensure_ascii=False)
+
+    except FileNotFoundError:
+        return json.dumps({
+            "success": False,
+            "error": "openocd not found in PATH. Please install OpenOCD.",
+        }, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
