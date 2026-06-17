@@ -1,0 +1,15 @@
+{
+  "name": "lingchain-embedded-c",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["extension", "server"],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "watch": "npm run watch --workspaces",
+    "package": "npm run build && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "typescript": "~5.4",
+    "@types/node": "^20"
+  }
+}

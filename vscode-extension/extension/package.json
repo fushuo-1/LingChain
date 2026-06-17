@@ -1,0 +1,53 @@
+{
+  "name": "@lingchain/embedded-c-client",
+  "version": "0.1.0",
+  "main": "./out/extension",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": [
+    "onLanguage:c",
+    "workspaceContains:**/*.uvprojx",
+    "onCommand:lingchain.selectProject"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "lingchain.selectProject",
+        "title": "LingµChain: Select Active Project"
+      },
+      {
+        "command": "lingchain.restartServer",
+        "title": "LingµChain: Restart Server"
+      }
+    ],
+    "configuration": {
+      "title": "LingµChain Embedded C",
+      "properties": {
+        "lingchain.armclangPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to armclang.exe"
+        },
+        "lingchain.projectPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to active .uvprojx file"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85",
+    "typescript": "~5.4",
+    "@types/node": "^20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "watch": "tsc -b --watch"
+  }
+}
