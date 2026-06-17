@@ -9,7 +9,6 @@ import {
 import * as path from 'path';
 import { scanKeilProjects, promptProjectSelection } from './keilProjectScanner';
 import { createStatusBar, updateStatusBar } from './statusBar';
-import { ensureCacheExclusion } from './cacheExclusion';
 
 /** Custom notification sent from client -> server when a project is selected. */
 export const SelectProjectNotification = new NotificationType<{ projectPath: string }>(
@@ -19,9 +18,6 @@ export const SelectProjectNotification = new NotificationType<{ projectPath: str
 let client: LanguageClient | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
-  // --- Auto-exclude cache directory from git and file explorer ---
-  ensureCacheExclusion();
-
   // --- Status bar ---
   createStatusBar(context);
 
