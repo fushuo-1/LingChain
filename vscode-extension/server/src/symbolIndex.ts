@@ -233,6 +233,48 @@ export class SymbolIndex {
   }
 
   /**
+   * Search for symbols whose name starts with `prefix` (case-sensitive).
+   *
+   * This is used by the completion provider to offer prefix-filtered
+   * suggestions as the user types.
+   *
+   * Returns at most `limit` results (default 200).
+   */
+  async findByPrefix(
+    prefix: string,
+    limit: number = 200,
+  ): Promise<IndexedSymbol[]> {
+    const db = this.requireDb();
+    const rows = db.all(
+      `SELECT s.id, s.name, s.kind, s.file, s.line, s.column, f.hash
+       FROM symbols s
+       JOIN files f ON f.uri = s.file
+       WHERE s.name LIKE ? || '%'
+       ORDER BY s.name
+       LIMIT ?`,
+      [prefix, limit],
+    ) as Array<{
+      id: number;
+      name: string;
+      kind: Symbol['kind'];
+      file: string;
+      line: number;
+      column: number;
+      hash: string;
+    }>;
+
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      kind: r.kind,
+      file: r.file,
+      line: r.line,
+      column: r.column,
+      hash: r.hash,
+    }));
+  }
+
+  /**
    * Delete all symbols (and the file record) for the given URI.
    */
   async deleteByFile(uri: string): Promise<void> {
