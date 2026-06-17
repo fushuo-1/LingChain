@@ -4,5 +4,15 @@
   "workspaces": [
     "extension",
     "server"
-  ]
+  ],
+  "scripts": {
+    "build:extension": "npm run compile --workspace=extension",
+    "build:server": "npm run build --workspace=server",
+    "build": "npm run build:server && npm run build:extension",
+    "test": "npm run test --workspace=extension && npm run test --workspace=server",
+    "package": "npm run build && cd extension && npx vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.0.0"
+  }
 }
