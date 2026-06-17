@@ -4,6 +4,9 @@ import {
   ProposedFeatures,
   InitializeParams,
   TextDocumentSyncKind,
+  DefinitionParams,
+  ReferenceParams,
+  HoverParams,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { Symbol } from './symbol';
@@ -12,6 +15,7 @@ import { CtagsExtractor } from './ctagsExtractor';
 import { SymbolIndex } from './symbolIndex';
 import { BackgroundIndexer } from './backgroundIndexer';
 import { ProgressReporter } from './progressReporter';
+import { NavigationProvider } from './navigationProvider';
 
 // ── Language server bootstrap ────────────────────────────────────────────
 
@@ -27,6 +31,9 @@ let symbolIndex: SymbolIndex | null = null;
 /** Background indexer – created once the symbol index is ready. */
 let backgroundIndexer: BackgroundIndexer | null = null;
 
+/** Navigation provider – created once the symbol index is ready. */
+let navigationProvider: NavigationProvider | null = null;
+
 /** Per-document symbol cache keyed by URI (legacy, kept for real-time edits). */
 const liveSymbolCache: Map<string, Symbol[]> = new Map();
 
@@ -34,6 +41,9 @@ connection.onInitialize((_params: InitializeParams) => {
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
+      definitionProvider: true,
+      referencesProvider: true,
+      hoverProvider: true,
     },
   };
 });
@@ -53,6 +63,9 @@ connection.onInitialized(async () => {
     ctagsExtractor,
     reporter,
   );
+
+  // Wire up the navigation provider.
+  navigationProvider = new NavigationProvider(symbolIndex);
 });
 
 /**
@@ -144,6 +157,35 @@ documents.onDidClose((event) => {
   liveSymbolCache.delete(event.document.uri);
 });
 
+// ── Navigation handlers ─────────────────────────────────────────────────
+
+connection.onDefinition((params: DefinitionParams) => {
+  if (!navigationProvider) return [];
+  return navigationProvider.getDefinition(
+    params.textDocument.uri,
+    params.position,
+    documents,
+  );
+});
+
+connection.onReferences((params: ReferenceParams) => {
+  if (!navigationProvider) return [];
+  return navigationProvider.getReferences(
+    params.textDocument.uri,
+    params.position,
+    documents,
+  );
+});
+
+connection.onHover((params: HoverParams) => {
+  if (!navigationProvider) return null;
+  return navigationProvider.getHover(
+    params.textDocument.uri,
+    params.position,
+    documents,
+  );
+});
+
 // ── Start ────────────────────────────────────────────────────────────────
 
 documents.listen(connection);
@@ -156,4 +198,5 @@ export {
   treeSitterExtractor,
   ctagsExtractor,
   startIndexingForProject,
+  navigationProvider,
 };
