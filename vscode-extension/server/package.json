@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "compile": "tsc -p tsconfig.json",
     "build": "tsc -p tsconfig.json",
     "test": "jest --config jest.config.js"
   },
