@@ -4,6 +4,7 @@ import {
   ProposedFeatures,
   InitializeParams,
   TextDocumentSyncKind,
+  CompletionParams,
   DefinitionParams,
   ReferenceParams,
   HoverParams,
@@ -19,6 +20,7 @@ import { BackgroundIndexer } from './backgroundIndexer';
 import { ProgressReporter } from './progressReporter';
 import { NavigationProvider } from './navigationProvider';
 import { SymbolListProvider } from './symbolListProvider';
+import { CompletionProvider } from './completionProvider';
 
 // ── Language server bootstrap ────────────────────────────────────────────
 
@@ -40,6 +42,9 @@ let navigationProvider: NavigationProvider | null = null;
 /** Symbol list provider – created once the symbol index is ready. */
 let symbolListProvider: SymbolListProvider | null = null;
 
+/** Completion provider – created once the symbol index is ready. */
+let completionProvider: CompletionProvider | null = null;
+
 /** Per-document symbol cache keyed by URI (legacy, kept for real-time edits). */
 const liveSymbolCache: Map<string, Symbol[]> = new Map();
 
@@ -52,6 +57,16 @@ connection.onInitialize((_params: InitializeParams) => {
       hoverProvider: true,
       documentSymbolProvider: true,
       workspaceSymbolProvider: true,
+      completionProvider: {
+        triggerCharacters: [
+          '_',
+          'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+          'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+          'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+          'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+          '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+        ],
+      },
     },
   };
 });
@@ -77,6 +92,9 @@ connection.onInitialized(async () => {
 
   // Wire up the symbol list provider.
   symbolListProvider = new SymbolListProvider(symbolIndex);
+
+  // Wire up the completion provider.
+  completionProvider = new CompletionProvider(symbolIndex);
 });
 
 /**
@@ -209,6 +227,17 @@ connection.onWorkspaceSymbol((params: WorkspaceSymbolParams) => {
   return symbolListProvider.getWorkspaceSymbols(params.query);
 });
 
+// ── Completion handler ──────────────────────────────────────────────────
+
+connection.onCompletion((params: CompletionParams) => {
+  if (!completionProvider) return [];
+  return completionProvider.getCompletion(
+    params.textDocument.uri,
+    params.position,
+    documents,
+  );
+});
+
 // ── Start ────────────────────────────────────────────────────────────────
 
 documents.listen(connection);
@@ -223,4 +252,5 @@ export {
   startIndexingForProject,
   navigationProvider,
   symbolListProvider,
+  completionProvider,
 };
