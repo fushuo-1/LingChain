@@ -9,6 +9,9 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { Symbol } from './symbol';
 import { TreeSitterExtractor } from './treeSitterExtractor';
 import { CtagsExtractor } from './ctagsExtractor';
+import { SymbolIndex } from './symbolIndex';
+import { BackgroundIndexer } from './backgroundIndexer';
+import { ProgressReporter } from './progressReporter';
 
 // ── Language server bootstrap ────────────────────────────────────────────
 
@@ -18,8 +21,14 @@ const documents = new TextDocuments(TextDocument);
 const treeSitterExtractor = new TreeSitterExtractor();
 const ctagsExtractor = new CtagsExtractor();
 
-/** Per-document symbol cache keyed by URI. */
-const symbolIndex: Map<string, Symbol[]> = new Map();
+/** Persistent symbol index (SQLite-backed). */
+let symbolIndex: SymbolIndex | null = null;
+
+/** Background indexer – created once the symbol index is ready. */
+let backgroundIndexer: BackgroundIndexer | null = null;
+
+/** Per-document symbol cache keyed by URI (legacy, kept for real-time edits). */
+const liveSymbolCache: Map<string, Symbol[]> = new Map();
 
 connection.onInitialize((_params: InitializeParams) => {
   return {
@@ -29,9 +38,44 @@ connection.onInitialize((_params: InitializeParams) => {
   };
 });
 
-connection.onInitialized(() => {
+connection.onInitialized(async () => {
   connection.console.log('[server] LingµChain C language server initialised.');
+
+  // Initialise the persistent symbol index.
+  symbolIndex = new SymbolIndex('.lingmupchain/symbols.db');
+  await symbolIndex.init();
+
+  // Wire up the background indexer.
+  const reporter = new ProgressReporter(connection);
+  backgroundIndexer = new BackgroundIndexer(
+    symbolIndex,
+    treeSitterExtractor,
+    ctagsExtractor,
+    reporter,
+  );
 });
+
+/**
+ * Trigger background indexing for the given list of source files.
+ *
+ * This is called when a project is selected or a compile context is
+ * resolved.  The indexer runs asynchronously so the LSP server remains
+ * responsive.
+ */
+function startIndexingForProject(files: string[]): void {
+  if (!backgroundIndexer) {
+    connection.console.warn(
+      '[server] Cannot start indexing – background indexer not ready.',
+    );
+    return;
+  }
+  // Fire and forget – indexing runs in the background.
+  backgroundIndexer.startIndexing(files).catch((err) => {
+    connection.console.error(
+      `[server] Background indexing failed: ${err instanceof Error ? err.message : err}`,
+    );
+  });
+}
 
 // ── Symbol extraction pipeline ────────────────────────────────────────────
 
@@ -70,7 +114,7 @@ async function extractForDocument(doc: TextDocument): Promise<void> {
     }
   }
 
-  symbolIndex.set(uri, symbols);
+  liveSymbolCache.set(uri, symbols);
 
   const byKind = new Map<string, number>();
   for (const s of symbols) {
@@ -97,7 +141,7 @@ documents.onDidOpen((event) => {
 });
 
 documents.onDidClose((event) => {
-  symbolIndex.delete(event.document.uri);
+  liveSymbolCache.delete(event.document.uri);
 });
 
 // ── Start ────────────────────────────────────────────────────────────────
@@ -106,4 +150,10 @@ documents.listen(connection);
 connection.listen();
 
 // Exported for testing
-export { symbolIndex, extractForDocument, treeSitterExtractor, ctagsExtractor };
+export {
+  liveSymbolCache as symbolIndex,
+  extractForDocument,
+  treeSitterExtractor,
+  ctagsExtractor,
+  startIndexingForProject,
+};

@@ -7,6 +7,7 @@
     "test": "jest --config jest.config.js"
   },
   "dependencies": {
+    "fast-xml-parser": "^5.9.1",
     "node-sqlite3-wasm": "^0.8.58",
     "vscode-languageserver": "^9.0.1",
     "vscode-languageserver-textdocument": "^1.0.11",
