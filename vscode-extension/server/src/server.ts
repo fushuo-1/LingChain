@@ -3,36 +3,25 @@ import {
   TextDocuments,
   ProposedFeatures,
   InitializeParams,
-  InitializeResult,
   TextDocumentSyncKind,
-  NotificationType,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import * as path from 'path';
-import { KeilProject, CompileContext } from './keilProject';
-import { ArmclangPreprocessor } from './armclangPreprocessor';
+import { Symbol } from './symbol';
+import { TreeSitterExtractor } from './treeSitterExtractor';
+import { CtagsExtractor } from './ctagsExtractor';
 
-// ---------------------------------------------------------------------------
-// Connection
-// ---------------------------------------------------------------------------
+// ── Language server bootstrap ────────────────────────────────────────────
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 
-// Custom notification matching the client
-const SelectProjectNotification = new NotificationType<{ projectPath: string }>(
-  'lingchain/selectProject'
-);
+const treeSitterExtractor = new TreeSitterExtractor();
+const ctagsExtractor = new CtagsExtractor();
 
-let activeContext: CompileContext | undefined;
-let preprocessor: ArmclangPreprocessor | undefined;
+/** Per-document symbol cache keyed by URI. */
+const symbolIndex: Map<string, Symbol[]> = new Map();
 
-// ---------------------------------------------------------------------------
-// Lifecycle
-// ---------------------------------------------------------------------------
-
-connection.onInitialize((_params: InitializeParams): InitializeResult => {
-  connection.console.log('LingµChain Embedded C server initializing...');
+connection.onInitialize((_params: InitializeParams) => {
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
@@ -41,120 +30,80 @@ connection.onInitialize((_params: InitializeParams): InitializeResult => {
 });
 
 connection.onInitialized(() => {
-  connection.console.log('LingµChain Embedded C server initialized.');
+  connection.console.log('[server] LingµChain C language server initialised.');
 });
 
-// ---------------------------------------------------------------------------
-// Custom notifications
-// ---------------------------------------------------------------------------
-
-connection.onNotification(SelectProjectNotification, (params) => {
-  const { projectPath } = params;
-  connection.console.log(`Received project selection: ${projectPath}`);
-
-  try {
-    const project = new KeilProject(projectPath);
-    project.parse();
-    activeContext = project.getCompileContext();
-
-    // Resolve armclang path — armclang ships with Keil MDK; we look for it
-    // next to the .uvprojx in the default ARMCC6 bin directory.
-    const armclangPath = resolveArmclangPath(project.projectDir);
-    preprocessor = new ArmclangPreprocessor(armclangPath, activeContext);
-
-    connection.console.log(
-      `Compile context loaded — target: ${activeContext.target}`
-    );
-    connection.console.log(
-      `  Include paths (${activeContext.includePaths.length}): ${activeContext.includePaths.join(', ')}`
-    );
-    connection.console.log(
-      `  Defines (${activeContext.defines.length}): ${activeContext.defines.join(', ')}`
-    );
-    connection.console.log(
-      `  Source files (${activeContext.sourceFiles.length}): ${activeContext.sourceFiles.join(', ')}`
-    );
-    connection.console.log(`  armclang path: ${armclangPath}`);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    connection.console.error(`Failed to parse project: ${message}`);
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Document sync — preprocess on open
-// ---------------------------------------------------------------------------
-
-documents.onDidOpen(async (event) => {
-  if (!preprocessor) {
-    return; // No project selected yet
-  }
-
-  const uri = event.document.uri;
-  // Only preprocess .c / .h files
-  if (!/\.(c|h)$/i.test(uri)) {
-    return;
-  }
-
-  const filePath = uri.startsWith('file://')
-    ? new URL(uri).pathname
-    : uri;
-
-  try {
-    const result = await preprocessor.preprocessFile(filePath);
-    connection.console.log(
-      `Preprocessed ${path.basename(filePath)} — ` +
-        `${result.lineMap.directiveCount} #line directives, ` +
-        `${result.lineMap.getIncludedFiles().length} included files`
-    );
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    connection.console.warn(
-      `Preprocessing failed for ${path.basename(filePath)}: ${message}`
-    );
-  }
-});
-
-documents.onDidChangeContent((_change) => {
-  // Phase 1: no diagnostics published yet
-});
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ── Symbol extraction pipeline ────────────────────────────────────────────
 
 /**
- * Resolve the armclang executable path.
+ * (Re-)extract symbols for a single document.
  *
- * Looks for armclang.exe (Windows) or armclang (Unix) next to the project
- * directory in the conventional Keil ARMCC6 location.  Falls back to
- * "armclang" on PATH if the conventional path does not exist.
+ * Strategy:
+ *  1. Try tree-sitter (fast, in-process WASM).
+ *  2. If tree-sitter is unavailable or produces zero symbols, fall back to
+ *     ctags (external binary).
+ *  3. If ctags also fails, use the regex fallback baked into
+ *     TreeSitterExtractor.
  */
-function resolveArmclangPath(projectDir: string): string {
-  // Keil v5 default: <UV4 install>/ARM/ARMCC/bin/armclang
-  // We accept an env override for custom installs.
-  const envPath = process.env.ARMCLANG_PATH;
-  if (envPath) {
-    return envPath;
+async function extractForDocument(doc: TextDocument): Promise<void> {
+  const uri = doc.uri;
+  const content = doc.getText();
+
+  // Step 1 – tree-sitter (or regex fallback inside the extractor).
+  let symbols = treeSitterExtractor.extractSymbols(content, uri);
+
+  // Step 2 – ctags fallback when tree-sitter couldn't produce results.
+  if (symbols.length === 0) {
+    connection.console.log(
+      `[server] tree-sitter produced 0 symbols for ${uri}; trying ctags…`,
+    );
+    try {
+      // ctags needs a file path; convert URI → filesystem path.
+      const filePath = uri.startsWith('file://')
+        ? decodeURIComponent(uri.slice(7)).replace(/^\/([A-Z]:)/, '$1') // Windows drive letter fix
+        : uri;
+      symbols = await ctagsExtractor.extractSymbols(filePath);
+    } catch (err) {
+      connection.console.warn(
+        `[server] ctags fallback failed for ${uri}: ${err}`,
+      );
+    }
   }
 
-  // Conventional location relative to the project
-  const candidate = path.join(
-    projectDir,
-    'ARM',
-    'ARMCC',
-    'bin',
-    process.platform === 'win32' ? 'armclang.exe' : 'armclang'
-  );
+  symbolIndex.set(uri, symbols);
 
-  // We return the candidate even if it may not exist; armclang -E will
-  // fail with a clear error that the caller can handle.
-  return candidate;
+  const byKind = new Map<string, number>();
+  for (const s of symbols) {
+    byKind.set(s.kind, (byKind.get(s.kind) ?? 0) + 1);
+  }
+
+  const summary = [...byKind.entries()]
+    .map(([k, n]) => `${k}=${n}`)
+    .join(', ');
+
+  connection.console.log(
+    `[server] ${uri}: extracted ${symbols.length} symbols (${summary})`,
+  );
 }
 
-// ---------------------------------------------------------------------------
-// Start
-// ---------------------------------------------------------------------------
+// ── Document lifecycle hooks ──────────────────────────────────────────────
+
+documents.onDidChangeContent((change) => {
+  extractForDocument(change.document);
+});
+
+documents.onDidOpen((event) => {
+  extractForDocument(event.document);
+});
+
+documents.onDidClose((event) => {
+  symbolIndex.delete(event.document.uri);
+});
+
+// ── Start ────────────────────────────────────────────────────────────────
 
 documents.listen(connection);
 connection.listen();
+
+// Exported for testing
+export { symbolIndex, extractForDocument, treeSitterExtractor, ctagsExtractor };
