@@ -7,6 +7,8 @@ import {
   DefinitionParams,
   ReferenceParams,
   HoverParams,
+  DocumentSymbolParams,
+  WorkspaceSymbolParams,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { Symbol } from './symbol';
@@ -16,6 +18,7 @@ import { SymbolIndex } from './symbolIndex';
 import { BackgroundIndexer } from './backgroundIndexer';
 import { ProgressReporter } from './progressReporter';
 import { NavigationProvider } from './navigationProvider';
+import { SymbolListProvider } from './symbolListProvider';
 
 // ── Language server bootstrap ────────────────────────────────────────────
 
@@ -34,6 +37,9 @@ let backgroundIndexer: BackgroundIndexer | null = null;
 /** Navigation provider – created once the symbol index is ready. */
 let navigationProvider: NavigationProvider | null = null;
 
+/** Symbol list provider – created once the symbol index is ready. */
+let symbolListProvider: SymbolListProvider | null = null;
+
 /** Per-document symbol cache keyed by URI (legacy, kept for real-time edits). */
 const liveSymbolCache: Map<string, Symbol[]> = new Map();
 
@@ -44,6 +50,8 @@ connection.onInitialize((_params: InitializeParams) => {
       definitionProvider: true,
       referencesProvider: true,
       hoverProvider: true,
+      documentSymbolProvider: true,
+      workspaceSymbolProvider: true,
     },
   };
 });
@@ -66,6 +74,9 @@ connection.onInitialized(async () => {
 
   // Wire up the navigation provider.
   navigationProvider = new NavigationProvider(symbolIndex);
+
+  // Wire up the symbol list provider.
+  symbolListProvider = new SymbolListProvider(symbolIndex);
 });
 
 /**
@@ -186,6 +197,18 @@ connection.onHover((params: HoverParams) => {
   );
 });
 
+// ── Symbol list handlers ────────────────────────────────────────────────
+
+connection.onDocumentSymbol((params: DocumentSymbolParams) => {
+  if (!symbolListProvider) return [];
+  return symbolListProvider.getDocumentSymbols(params.textDocument.uri);
+});
+
+connection.onWorkspaceSymbol((params: WorkspaceSymbolParams) => {
+  if (!symbolListProvider) return [];
+  return symbolListProvider.getWorkspaceSymbols(params.query);
+});
+
 // ── Start ────────────────────────────────────────────────────────────────
 
 documents.listen(connection);
@@ -199,4 +222,5 @@ export {
   ctagsExtractor,
   startIndexingForProject,
   navigationProvider,
+  symbolListProvider,
 };

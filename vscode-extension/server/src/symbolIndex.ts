@@ -192,6 +192,47 @@ export class SymbolIndex {
   }
 
   /**
+   * Search for symbols whose name contains `query` as a substring
+   * (case-sensitive).
+   *
+   * Returns at most `limit` results (default 50).
+   */
+  async findBySubstring(
+    query: string,
+    limit: number = 50,
+  ): Promise<IndexedSymbol[]> {
+    const db = this.requireDb();
+    // Use INSTR for case-sensitive substring matching (SQLite LIKE is
+    // case-insensitive for ASCII by default).
+    const rows = db.all(
+      `SELECT s.id, s.name, s.kind, s.file, s.line, s.column, f.hash
+       FROM symbols s
+       JOIN files f ON f.uri = s.file
+       WHERE INSTR(s.name, ?) > 0
+       LIMIT ?`,
+      [query, limit],
+    ) as Array<{
+      id: number;
+      name: string;
+      kind: Symbol['kind'];
+      file: string;
+      line: number;
+      column: number;
+      hash: string;
+    }>;
+
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      kind: r.kind,
+      file: r.file,
+      line: r.line,
+      column: r.column,
+      hash: r.hash,
+    }));
+  }
+
+  /**
    * Delete all symbols (and the file record) for the given URI.
    */
   async deleteByFile(uri: string): Promise<void> {
