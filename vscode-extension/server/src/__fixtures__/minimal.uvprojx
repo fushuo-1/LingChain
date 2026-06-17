@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<Project>
+  <SchemaVersion>2.1</SchemaVersion>
+  <Targets>
+    <Target>
+      <TargetName>Debug</TargetName>
+      <ToolsetNumber>0x4</ToolsetNumber>
+      <ToolsetName>ARM-ADS</ToolsetName>
+      <TargetOption>
+        <TargetCommonOption>
+          <Device>STM32F407VGTx</Device>
+          <Vendor>STMicroelectronics</Vendor>
+          <TargetStatus>
+            <Error>0</Error>
+            <ExitCodeStop>0</ExitCodeStop>
+            <ButtonStop>0</ButtonStop>
+            <NotGenerated>0</NotGenerated>
+            <InvalidFlash>1</InvalidFlash>
+          </TargetStatus>
+        </TargetCommonOption>
+        <TargetArmAds>
+          <Cads>
+            <VariousControls>
+              <Define>DEBUG,STM32F407xx</Define>
+              <IncludePath>./Inc;./Drivers/CMSIS/Include</IncludePath>
+            </VariousControls>
+          </Cads>
+        </TargetArmAds>
+      </TargetOption>
+    </Target>
+  </Targets>
+  <Groups>
+    <Group>
+      <GroupName>Application</GroupName>
+      <Files>
+        <File>
+          <FileName>main.c</FileName>
+          <FileType>1</FileType>
+          <FilePath>.\Src\main.c</FilePath>
+        </File>
+      </Files>
+    </Group>
+  </Groups>
+</Project>

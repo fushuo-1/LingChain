@@ -1,53 +1,49 @@
 {
   "name": "@lingchain/embedded-c-client",
+  "displayName": "LingµChain Embedded C",
+  "description": "LSP client for embedded C projects (Keil MDK / ARM Compiler)",
   "version": "0.1.0",
-  "main": "./out/extension",
+  "publisher": "lingchain",
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Programming Languages"],
-  "activationEvents": [
-    "onLanguage:c",
-    "workspaceContains:**/*.uvprojx",
-    "onCommand:lingchain.selectProject"
+  "categories": [
+    "Programming Languages"
   ],
+  "activationEvents": [
+    "workspaceContains:**/*.uvprojx",
+    "onLanguage:c",
+    "onLanguage:cpp"
+  ],
+  "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "lingchain.selectProject",
-        "title": "LingµChain: Select Active Project"
-      },
-      {
-        "command": "lingchain.restartServer",
-        "title": "LingµChain: Restart Server"
+        "title": "LingµChain: Select Keil Project"
       }
     ],
     "configuration": {
-      "title": "LingµChain Embedded C",
+      "title": "LingµChain",
       "properties": {
-        "lingchain.armclangPath": {
+        "lingchain.server.path": {
           "type": "string",
           "default": "",
-          "description": "Path to armclang.exe"
-        },
-        "lingchain.projectPath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to active .uvprojx file"
+          "description": "Path to the LSP server module (leave empty to use bundled)"
         }
       }
     }
   },
-  "dependencies": {
-    "vscode-languageclient": "^9"
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85",
-    "typescript": "~5.4",
-    "@types/node": "^20"
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
   },
-  "scripts": {
-    "build": "tsc -b",
-    "watch": "tsc -b --watch"
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
   }
 }

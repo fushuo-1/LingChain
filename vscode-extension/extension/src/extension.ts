@@ -1,116 +1,90 @@
-import * as path from "path";
-import * as vscode from "vscode";
+import * as vscode from 'vscode';
 import {
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
   TransportKind,
-} from "vscode-languageclient/node";
+  NotificationType,
+} from 'vscode-languageclient/node';
+import * as path from 'path';
+import { scanKeilProjects, promptProjectSelection } from './keilProjectScanner';
+import { createStatusBar, updateStatusBar } from './statusBar';
 
-const SERVER_ENTRY = path.join(__dirname, "..", "..", "server", "out", "server.js");
-
-const CLIENT_ID = "lingchainEmbeddedC";
-const CLIENT_NAME = "LingµChain Embedded C";
+/** Custom notification sent from client -> server when a project is selected. */
+export const SelectProjectNotification = new NotificationType<{ projectPath: string }>(
+  'lingchain/selectProject'
+);
 
 let client: LanguageClient | undefined;
 
-export async function activate(
-  context: vscode.ExtensionContext
-): Promise<void> {
-  const disposables: vscode.Disposable[] = [];
+export function activate(context: vscode.ExtensionContext): void {
+  // --- Status bar ---
+  createStatusBar(context);
 
-  disposables.push(
-    vscode.commands.registerCommand(
-      "lingchain.selectProject",
-      async () => {
-        const files = await vscode.workspace.findFiles(
-          "**/*.uvprojx",
-          "**/node_modules/**"
-        );
-        if (files.length === 0) {
-          void vscode.window.showWarningMessage(
-            "No .uvprojx files found in workspace."
-          );
-          return;
-        }
-        const items = files.map((uri) => ({
-          label: vscode.workspace.asRelativePath(uri),
-          uri,
-        }));
-        const picked = await vscode.window.showQuickPick(items, {
-          placeHolder: "Select a µVision project to activate",
+  // --- Register the select-project command ---
+  const selectProjectCmd = vscode.commands.registerCommand(
+    'lingchain.selectProject',
+    async () => {
+      const uri = await promptProjectSelection();
+      if (!uri) {
+        return;
+      }
+
+      updateStatusBar(uri.fsPath);
+
+      // Notify the language server about the new active project
+      if (client) {
+        client.sendNotification(SelectProjectNotification, {
+          projectPath: uri.fsPath,
         });
-        if (picked) {
-          await vscode.workspace
-            .getConfiguration("lingchain")
-            .update("projectPath", picked.uri.fsPath, true);
-          void vscode.window.showInformationMessage(
-            `Active project set to: ${picked.label}`
-          );
-        }
       }
-    )
+    }
+  );
+  context.subscriptions.push(selectProjectCmd);
+
+  // --- Start the LSP server ---
+  const serverModule = context.asAbsolutePath(
+    path.join('..', 'server', 'out', 'server.js')
   );
 
-  disposables.push(
-    vscode.commands.registerCommand(
-      "lingchain.restartServer",
-      async () => {
-        if (client) {
-          await client.stop();
-        }
-        await startClient();
-        void vscode.window.showInformationMessage(
-          "LingµChain language server restarted."
-        );
-      }
-    )
-  );
-
-  context.subscriptions.push(...disposables);
-
-  await startClient();
-}
-
-async function startClient(): Promise<void> {
   const serverOptions: ServerOptions = {
-    run: {
-      module: SERVER_ENTRY,
-      transport: TransportKind.stdio,
-    },
+    run: { module: serverModule, transport: TransportKind.ipc },
     debug: {
-      module: SERVER_ENTRY,
-      transport: TransportKind.stdio,
-      options: { execArgv: ["--inspect=6009"] },
+      module: serverModule,
+      transport: TransportKind.ipc,
+      options: { execArgv: ['--nolazy', '--inspect=6009'] },
     },
   };
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
-      { scheme: "file", language: "c" },
-      { scheme: "file", language: "cpp" },
+      { scheme: 'file', language: 'c' },
+      { scheme: 'file', language: 'cpp' },
     ],
-    synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.uvprojx"),
-    },
   };
 
-  client = new LanguageClient(CLIENT_ID, CLIENT_NAME, serverOptions, clientOptions);
+  client = new LanguageClient(
+    'lingchainEmbeddedC',
+    'LingµChain Embedded C',
+    serverOptions,
+    clientOptions
+  );
 
-  try {
-    await client.start();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    void vscode.window.showErrorMessage(
-      `LingµChain language server failed to start: ${msg}`
-    );
-    throw err;
-  }
+  client.start();
+
+  // --- Auto-select if exactly one project exists ---
+  scanKeilProjects().then((projects) => {
+    if (projects.length === 1) {
+      updateStatusBar(projects[0].fsPath);
+      if (client) {
+        client.sendNotification(SelectProjectNotification, {
+          projectPath: projects[0].fsPath,
+        });
+      }
+    }
+  });
 }
 
-export async function deactivate(): Promise<void> {
-  if (client) {
-    await client.stop();
-    client = undefined;
-  }
+export function deactivate(): Thenable<void> | undefined {
+  return client?.stop();
 }
