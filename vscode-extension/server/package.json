@@ -7,6 +7,7 @@
     "test": "jest --config jest.config.js"
   },
   "dependencies": {
+    "node-sqlite3-wasm": "^0.8.58",
     "vscode-languageserver": "^9.0.1",
     "vscode-languageserver-textdocument": "^1.0.11",
     "web-tree-sitter": "^0.22.6"
