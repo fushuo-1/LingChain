@@ -16,11 +16,26 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from mcp_server.keil import (
+    keil_build_impl,
+    keil_clean_impl,
+    keil_flash_impl,
+    keil_rebuild_impl,
+)
+from mcp_server.scope import (
+    scope_analyze_waveform_impl,
+    scope_connect_impl,
+    scope_get_config_impl,
+    scope_get_measurement_impl,
+    scope_get_waveform_impl,
+    scope_list_channels_impl,
+    scope_set_timebase_impl,
+    scope_set_voltage_scale_impl,
+)
 from mcp_server.utils.ioc_parser import parse_ioc, get_chip_series, get_chip_target
 from mcp_server.utils.project_scanner import scan_project
-from mcp_server.utils.toolchain_manager import generate_toolchain_content
 
-mcp = FastMCP("lingchain-mcp")
+mcp = FastMCP("LingChain")
 
 
 @mcp.tool()
@@ -647,3 +662,231 @@ def analyze(
             "success": False,
             "error": f"Tool not found: {e}. Please install arm-none-eabi toolchain.",
         }, indent=2, ensure_ascii=False)
+
+
+# ── Keil MDK Tools ────────────────────────────────────────────
+
+@mcp.tool()
+def keil_build(project_path: str, target: str = "") -> str:
+    """Build Keil MDK project (incremental) using UV4.exe.
+
+    Compiles only changed files. Use keil_rebuild for a full recompile.
+
+    Args:
+        project_path: Path to .uvprojx file or project directory containing one
+        target: Target name (empty to use the default target)
+
+    Returns:
+        JSON string with build result: error/warning counts, output files, program size
+    """
+    return keil_build_impl(project_path, target)
+
+
+@mcp.tool()
+def keil_clean(project_path: str, target: str = "") -> str:
+    """Clean Keil MDK project build output.
+
+    Removes all intermediate and output files for the target.
+
+    Args:
+        project_path: Path to .uvprojx file or project directory containing one
+        target: Target name (empty to use the default target)
+
+    Returns:
+        JSON string with clean result
+    """
+    return keil_clean_impl(project_path, target)
+
+
+@mcp.tool()
+def keil_flash(project_path: str, target: str = "") -> str:
+    """Flash firmware to target device via Keil UV4.exe.
+
+    Uses the debug probe and flash algorithm configured in the .uvoptx file.
+    Requires a connected debug probe (ST-LINK, J-LINK, etc.).
+
+    Args:
+        project_path: Path to .uvprojx file or project directory containing one
+        target: Target name (empty to use the default target)
+
+    Returns:
+        JSON string with flash result
+    """
+    return keil_flash_impl(project_path, target)
+
+
+@mcp.tool()
+def keil_rebuild(project_path: str, target: str = "") -> str:
+    """Rebuild Keil MDK project (clean + build all files).
+
+    Performs a full recompile of all source files regardless of changes.
+
+    Args:
+        project_path: Path to .uvprojx file or project directory containing one
+        target: Target name (empty to use the default target)
+
+    Returns:
+        JSON string with rebuild result: error/warning counts, output files, program size
+    """
+    return keil_rebuild_impl(project_path, target)
+
+
+# ── Oscilloscope Tools ─────────────────────────────────────────
+
+
+@mcp.tool()
+def scope_connect(address: str = "") -> str:
+    """Connect to a USB oscilloscope and verify communication.
+
+    Auto-scans USB VISA resources if no address is provided.
+    Returns device identification on success.
+
+    Args:
+        address: VISA resource address (e.g. "USB0::0x5656::0x0832::SERIAL::INSTR").
+                 Empty string to auto-detect.
+
+    Returns:
+        JSON string with connection status and device info
+    """
+    return scope_connect_impl(address or None)
+
+
+@mcp.tool()
+def scope_list_channels() -> str:
+    """List oscilloscope channels and their current configuration.
+
+    Returns the display state, coupling, probe ratio, and vertical
+    scale for each available channel.
+
+    Returns:
+        JSON string with channel list and settings
+    """
+    return scope_list_channels_impl()
+
+
+@mcp.tool()
+def scope_get_config() -> str:
+    """Query current oscilloscope configuration.
+
+    Returns timebase settings, acquisition type, trigger configuration,
+    and a summary of active channels.
+
+    Returns:
+        JSON string with full oscilloscope configuration
+    """
+    return scope_get_config_impl()
+
+
+@mcp.tool()
+def scope_get_waveform(channel: int = 1) -> str:
+    """Read waveform data from the specified oscilloscope channel.
+
+    Acquires a single waveform trace and returns the data as
+    voltage and time arrays in physical units (Volts, Seconds).
+    Acquisition is paused briefly during readout then resumed.
+
+    Args:
+        channel: Channel number (1-4, default 1)
+
+    Returns:
+        JSON string with waveform metadata, time array, and voltage array
+    """
+    return scope_get_waveform_impl(channel)
+
+
+@mcp.tool()
+def scope_get_measurement(channel: int = 1) -> str:
+    """Read automatic measurements from the specified oscilloscope channel.
+
+    Returns frequency, period, amplitude, Vmax, Vmin, Vrms, rise time,
+    and fall time. Values are null when no valid signal is present.
+
+    Args:
+        channel: Channel number (1-4, default 1)
+
+    Returns:
+        JSON string with measurement results
+    """
+    return scope_get_measurement_impl(channel)
+
+
+@mcp.tool()
+def scope_analyze_waveform(channel: int = 1, pole_pairs: int = 2) -> str:
+    """Analyze waveform: auto-detect signal type, measure frequency/duty/amplitude,
+    assess signal quality (rise time, overshoot, glitches), and detect commutation patterns.
+
+    Works with any signal type: PWM, sine, square, triangle, BLDC motor drive, etc.
+
+    Args:
+        channel: Channel number (1-4, default 1)
+        pole_pairs: Motor pole pairs for RPM estimation (default 2, ignored for non-motor signals)
+
+    Returns:
+        JSON string with signal characterization, quality metrics, and optional commutation analysis
+    """
+    return scope_analyze_waveform_impl(channel, pole_pairs)
+
+
+@mcp.tool()
+def scope_set_timebase(
+    scale_s_div: float = 0,
+    offset_s: float = 0,
+    auto: bool = False,
+    channel: int = 1,
+    cycles: int = 3,
+) -> str:
+    """Adjust oscilloscope timebase (time per division).
+
+    Supports two modes:
+    - Manual: set scale (s/div) and/or offset directly
+    - Auto: automatically adjust timebase to show N complete signal cycles on screen
+
+    Args:
+        scale_s_div: Time per division in seconds (e.g. 0.001 = 1ms/div).
+                     Set to 0 to query current value without changing.
+        offset_s: Trigger offset in seconds.
+        auto: If true, auto-adjust timebase based on signal frequency.
+        channel: Channel to read frequency from (used with auto mode).
+        cycles: Number of complete cycles to show on screen (default 3, used with auto mode).
+
+    Returns:
+        JSON string with timebase settings
+    """
+    return scope_set_timebase_impl(
+        scale_s_div=scale_s_div if scale_s_div > 0 else None,
+        offset_s=offset_s if offset_s != 0 else None,
+        auto=auto,
+        channel=channel,
+        cycles=cycles,
+    )
+
+
+@mcp.tool()
+def scope_set_voltage_scale(
+    channel: int = 1,
+    scale_v_div: float = 0,
+    offset_v: float = 0,
+    auto: bool = False,
+) -> str:
+    """Adjust oscilloscope vertical scale (Volts/div) for a channel.
+
+    Supports two modes:
+    - Manual: set scale (V/div) and/or offset directly
+    - Auto: automatically adjust scale to fit signal amplitude on screen
+
+    Args:
+        channel: Channel number (1-4, default 1)
+        scale_v_div: Volts per division (e.g. 1.0 = 1V/div).
+                     Set to 0 to query current value without changing.
+        offset_v: Vertical offset in volts.
+        auto: If true, auto-adjust scale to fit signal amplitude.
+
+    Returns:
+        JSON string with voltage scale settings
+    """
+    return scope_set_voltage_scale_impl(
+        channel=channel,
+        scale_v_div=scale_v_div if scale_v_div > 0 else None,
+        offset_v=offset_v if offset_v != 0 else None,
+        auto=auto,
+    )
