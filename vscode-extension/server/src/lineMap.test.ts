@@ -1,4 +1,36 @@
-import { LineMap, OriginalPosition } from './lineMap';
+import { LineMap, OriginalPosition, unescapeDirectivePath } from './lineMap';
+
+// ── Path unescaping ──────────────────────────────────────────────────────
+
+describe('unescapeDirectivePath', () => {
+  it('should collapse doubled backslashes emitted by armclang', () => {
+    // armclang -E writes Windows paths in escaped form.
+    expect(unescapeDirectivePath('C:\\\\Keil\\\\Inc\\\\util.h')).toBe(
+      'C:\\Keil\\Inc\\util.h',
+    );
+  });
+
+  it('should unescape embedded quotes', () => {
+    expect(unescapeDirectivePath('C:\\\\odd\\"dir\\\\a.h')).toBe(
+      'C:\\odd"dir\\a.h',
+    );
+  });
+
+  it('should leave forward-slash paths untouched', () => {
+    expect(unescapeDirectivePath('C:/proj/Inc/util.h')).toBe(
+      'C:/proj/Inc/util.h',
+    );
+  });
+
+  it('should be applied while parsing directives', () => {
+    const map = new LineMap('# 3 "C:\\\\proj\\\\Inc\\\\util.h"\nint x;');
+
+    expect(map.getOriginalPosition(2)).toEqual({
+      file: 'C:\\proj\\Inc\\util.h',
+      line: 3,
+    });
+  });
+});
 
 describe('LineMap', () => {
   // -----------------------------------------------------------------------
@@ -11,8 +43,9 @@ describe('LineMap', () => {
       const map = new LineMap(content);
 
       expect(map.directiveCount).toBe(1);
-      const pos = map.getOriginalPosition(1);
-      expect(pos).toEqual({ file: 'main.c', line: 10 });
+      // The directive is on line 1; its NEXT line maps to main.c:10.
+      expect(map.getOriginalPosition(1)).toBeUndefined();
+      expect(map.getOriginalPosition(2)).toEqual({ file: 'main.c', line: 10 });
     });
 
     it('should parse the short # <n> "<file>" form', () => {
@@ -20,7 +53,7 @@ describe('LineMap', () => {
       const map = new LineMap(content);
 
       expect(map.directiveCount).toBe(1);
-      expect(map.getOriginalPosition(1)).toEqual({ file: 'utils.h', line: 5 });
+      expect(map.getOriginalPosition(2)).toEqual({ file: 'utils.h', line: 5 });
     });
 
     it('should parse a directive with flags (e.g. system header flag)', () => {
@@ -28,7 +61,7 @@ describe('LineMap', () => {
       const map = new LineMap(content);
 
       expect(map.directiveCount).toBe(1);
-      expect(map.getOriginalPosition(1)).toEqual({ file: 'stm32.h', line: 1 });
+      expect(map.getOriginalPosition(2)).toEqual({ file: 'stm32.h', line: 1 });
     });
 
     it('should ignore lines that are not #line directives', () => {
@@ -70,34 +103,33 @@ describe('LineMap', () => {
 
     const map = new LineMap(content);
 
-    it('should map line 1 to main.c:1', () => {
-      expect(map.getOriginalPosition(1)).toEqual({ file: 'main.c', line: 1 });
+    it('should map line 2 to main.c:1 (directive\'s next line)', () => {
+      expect(map.getOriginalPosition(2)).toEqual({ file: 'main.c', line: 1 });
     });
 
-    it('should map line 4 to header.h:4 (offset 3 from directive at line 3)', () => {
-      // Directive at preprocessed line 3 says header.h:1
-      // preprocessed line 4 = 3 + 1 => header.h:1+1 = header.h:2
+    it('should map line 4 to header.h:1 (directive at line 3)', () => {
+      // Directive at preprocessed line 3 says the next line (4) is header.h:1
       expect(map.getOriginalPosition(4)).toEqual({
         file: 'header.h',
-        line: 2,
+        line: 1,
       });
     });
 
-    it('should map line 5 to header.h:5', () => {
-      // Directive at line 5 says header.h:5
-      expect(map.getOriginalPosition(5)).toEqual({
+    it('should map line 6 to header.h:5 (directive at line 5)', () => {
+      // Directive at line 5 says the next line (6) is header.h:5
+      expect(map.getOriginalPosition(6)).toEqual({
         file: 'header.h',
         line: 5,
       });
     });
 
-    it('should map line 6 to main.c:3', () => {
-      expect(map.getOriginalPosition(6)).toEqual({ file: 'main.c', line: 3 });
+    it('should map line 7 to main.c:3 (directive at line 6)', () => {
+      expect(map.getOriginalPosition(7)).toEqual({ file: 'main.c', line: 3 });
     });
 
-    it('should map line 8 to main.c:5 (offset from main.c:3 directive)', () => {
-      // Directive at line 6 says main.c:3; line 8 = 6+2 => 3+2 = 5
-      expect(map.getOriginalPosition(8)).toEqual({ file: 'main.c', line: 5 });
+    it('should map line 9 to main.c:5 (offset from main.c:3 directive)', () => {
+      // Directive at line 6 says main.c:3; line 9 = 7 + 2 => 3 + 2 = 5
+      expect(map.getOriginalPosition(9)).toEqual({ file: 'main.c', line: 5 });
     });
 
     it('should return included files in order of first appearance', () => {
@@ -136,6 +168,8 @@ describe('LineMap', () => {
       const map = new LineMap(content);
       // Line 1 is "bogus line" which is before the directive at line 2
       expect(map.getOriginalPosition(1)).toBeUndefined();
+      // Line 3 (after the directive at line 2) maps to main.c:10
+      expect(map.getOriginalPosition(3)).toEqual({ file: 'main.c', line: 10 });
     });
 
     it('should handle empty content', () => {
@@ -148,7 +182,7 @@ describe('LineMap', () => {
     it('should handle very large line numbers without overflow', () => {
       const content = `#line 999999 "big.c"\nint x;`;
       const map = new LineMap(content);
-      expect(map.getOriginalPosition(1)).toEqual({
+      expect(map.getOriginalPosition(2)).toEqual({
         file: 'big.c',
         line: 999999,
       });
@@ -161,10 +195,10 @@ describe('LineMap', () => {
         'int x;',
       ].join('\n');
       const map = new LineMap(content);
-      // Line 2 is the second directive: a.c:100
-      expect(map.getOriginalPosition(2)).toEqual({ file: 'a.c', line: 100 });
-      // Line 3 = offset 1 from line 2 => a.c:101
-      expect(map.getOriginalPosition(3)).toEqual({ file: 'a.c', line: 101 });
+      // Line 3 is the directive's next line: a.c:100
+      expect(map.getOriginalPosition(3)).toEqual({ file: 'a.c', line: 100 });
+      // Line 4 = offset 1 from line 3 => a.c:101
+      expect(map.getOriginalPosition(4)).toEqual({ file: 'a.c', line: 101 });
     });
 
     it('should count directives correctly', () => {

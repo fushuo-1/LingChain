@@ -11,6 +11,7 @@ import { execFile, ExecFileException } from 'child_process';
 import * as path from 'path';
 import { CompileContext } from './keilProject';
 import { LineMap } from './lineMap';
+import { armclangTargetFlags } from './armclangArgs';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -71,12 +72,17 @@ export class ArmclangPreprocessor {
    *
    * Includes:
    *   - `-E`            : stop after preprocessing
+   *   - target flags    : `--target` (and `-mcpu` when known) so that the
+   *                       target-dependent built-in macros resolve correctly
    *   - `-I <dir>`      : one per include path
    *   - `-D <macro>`    : one per define
    *   - The source file itself
    */
   buildArgs(filePath: string): string[] {
-    const args: string[] = ['-E'];
+    const args: string[] = [
+      '-E',
+      ...armclangTargetFlags(this.compileContext.target),
+    ];
 
     for (const inc of this.compileContext.includePaths) {
       args.push('-I', inc);

@@ -6,7 +6,7 @@ const COMMAND_ID = 'lingchain.selectProject';
 let statusBarItem: vscode.StatusBarItem | undefined;
 
 /**
- * Create and register the LingµChain status bar item.
+ * Create and register the LingChain status bar item.
  *
  * The item is placed on the left side of the status bar and shows the active
  * Keil project name. Clicking it triggers the project selection command.
@@ -43,10 +43,10 @@ export function updateStatusBar(projectPath: string | undefined): void {
 
   if (projectPath) {
     const name = path.basename(projectPath, '.uvprojx');
-    statusBarItem.text = `LingµChain: ${name}`;
+    statusBarItem.text = `LingChain: ${name}`;
     statusBarItem.tooltip = projectPath;
   } else {
-    statusBarItem.text = 'LingµChain: (no project)';
+    statusBarItem.text = 'LingChain: (no project)';
     statusBarItem.tooltip = 'Click to select active Keil project';
   }
 }

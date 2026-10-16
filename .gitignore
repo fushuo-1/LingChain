@@ -25,5 +25,14 @@ venv/
 # Node
 node_modules/
 
+# Bundled LSP server staged for VSIX packaging (see vscode-extension/scripts)
+vscode-extension/extension/server/
+
+# Symbol index cache written next to the indexed project's sources
+.lingchain/
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
 # Claude Code
 .claude/

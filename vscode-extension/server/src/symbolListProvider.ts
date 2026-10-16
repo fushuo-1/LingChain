@@ -5,7 +5,7 @@ import {
   Range,
 } from 'vscode-languageserver';
 import { SymbolIndex, IndexedSymbol } from './symbolIndex';
-import { Symbol } from './symbol';
+import { Symbol, LiveSymbolStore, LocatedSymbol } from './symbol';
 
 // ── SymbolListProvider ───────────────────────────────────────────────────
 
@@ -20,12 +20,18 @@ import { Symbol } from './symbol';
  *    symbol index by name prefix / substring and returns matching symbols
  *    with their file locations.  Used by the "Go to Symbol in Workspace"
  *    command (Ctrl+T).
+ *
+ * Symbols from open documents (`LiveSymbolStore`) take precedence over the
+ * persisted index so unsaved edits show up in the Outline and the symbol
+ * picker immediately.
  */
 export class SymbolListProvider {
   private readonly index: SymbolIndex;
+  private readonly live: LiveSymbolStore | undefined;
 
-  constructor(index: SymbolIndex) {
+  constructor(index: SymbolIndex, live?: LiveSymbolStore) {
     this.index = index;
+    this.live = live;
   }
 
   // ── Document Symbols ──────────────────────────────────────────────────
@@ -38,8 +44,12 @@ export class SymbolListProvider {
    * symbol name on its definition line.
    */
   async getDocumentSymbols(uri: string): Promise<DocumentSymbol[]> {
-    const indexed = await this.index.findByFile(uri);
+    const live = this.live?.get(uri);
+    if (live && live.length > 0) {
+      return live.map((sym) => this.indexedToDocumentSymbol(sym));
+    }
 
+    const indexed = await this.index.findByFile(uri);
     return indexed.map((sym) => this.indexedToDocumentSymbol(sym));
   }
 
@@ -57,22 +67,35 @@ export class SymbolListProvider {
       return [];
     }
 
-    const matches = await this.index.findBySubstring(query, 50);
+    const liveMatches = (this.live?.all() ?? []).filter((s) =>
+      s.name.includes(query),
+    );
+    const indexed = await this.index.findBySubstring(query, 50);
 
-    return matches.map((sym) => this.indexedToSymbolInformation(sym));
+    // Live symbols first, then index entries that are not already covered.
+    const seen = new Set(liveMatches.map((s) => symbolKey(s)));
+    const merged: LocatedSymbol[] = [...liveMatches];
+    for (const sym of indexed) {
+      const key = symbolKey(sym);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(sym);
+    }
+
+    return merged.slice(0, 50).map((sym) => this.indexedToSymbolInformation(sym));
   }
 
   // ── Mapping helpers ───────────────────────────────────────────────────
 
   /**
-   * Convert an IndexedSymbol to an LSP DocumentSymbol (used by the
+   * Convert a symbol to an LSP DocumentSymbol (used by the
    * Outline view).
    *
    * The range covers the full definition line so that the highlight in
    * the Outline view is meaningful even without a full parse.  The
    * selectionRange covers just the symbol name.
    */
-  private indexedToDocumentSymbol(sym: IndexedSymbol): DocumentSymbol {
+  private indexedToDocumentSymbol(sym: LocatedSymbol): DocumentSymbol {
     const nameRange: Range = {
       start: { line: sym.line, character: sym.column },
       end: { line: sym.line, character: sym.column + sym.name.length },
@@ -87,10 +110,10 @@ export class SymbolListProvider {
   }
 
   /**
-   * Convert an IndexedSymbol to an LSP SymbolInformation (used by
-   * workspace symbol search).
+   * Convert a symbol to an LSP SymbolInformation (used by workspace symbol
+   * search).
    */
-  private indexedToSymbolInformation(sym: IndexedSymbol): SymbolInformation {
+  private indexedToSymbolInformation(sym: LocatedSymbol): SymbolInformation {
     return {
       name: sym.name,
       kind: this.mapKind(sym.kind),
@@ -117,4 +140,11 @@ export class SymbolListProvider {
     };
     return map[kind] ?? SymbolKind.Null;
   }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+/** Stable identity of a symbol occurrence, used to de-duplicate results. */
+function symbolKey(sym: LocatedSymbol): string {
+  return `${sym.file}:${sym.line}:${sym.column}`;
 }

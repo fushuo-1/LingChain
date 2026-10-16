@@ -150,4 +150,46 @@ describe('KeilProject', () => {
       expect(() => project.parse()).toThrow();
     });
   });
+
+  // -----------------------------------------------------------------------
+  // CubeMX layout: <Groups> nested inside <Target>
+  // -----------------------------------------------------------------------
+  describe('cubeMX-target-groups.uvprojx (Groups inside <Target>)', () => {
+    const project = new KeilProject(
+      path.join(FIXTURES, 'cubeMX-target-groups.uvprojx')
+    );
+
+    beforeAll(() => {
+      project.parse();
+    });
+
+    // Real CubeMX projects keep the file list under <Target>, not <Project>;
+    // reading only the project level silently yields zero source files and no
+    // indexing ever happens.
+    it('should read the file list from the selected target', () => {
+      const ctx = project.getCompileContext();
+      const names = ctx.sourceFiles.map((f) => path.basename(f)).sort();
+
+      expect(names).toEqual(['bsp_adc.c', 'main.c', 'startup_stm32g070xx.s']);
+    });
+
+    it('should resolve ../ paths against the project directory', () => {
+      const ctx = project.getCompileContext();
+      const main = ctx.sourceFiles.find((f) => f.endsWith('main.c'));
+
+      // `..` is resolved against the project directory: the fixture lives in
+      // __fixtures__, mirroring a real project whose .uvprojx sits in MDK-ARM/.
+      expect(main).toBe(path.resolve(project.projectDir, '../Core/Src/main.c'));
+    });
+
+    it('should still expose device, defines and include paths', () => {
+      const ctx = project.getCompileContext();
+
+      expect(ctx.target).toBe('STM32G070CBTx');
+      expect(ctx.defines).toEqual(['STM32G070xx', 'USE_HAL_DRIVER']);
+      expect(
+        ctx.includePaths.map((p) => n(path.basename(p)))
+      ).toEqual(expect.arrayContaining(['Inc', 'Bsp']));
+    });
+  });
 });

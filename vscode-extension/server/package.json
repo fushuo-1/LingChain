@@ -1,5 +1,5 @@
 {
-  "name": "lingmupchain-c-langserver",
+  "name": "lingchain-c-langserver",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -10,6 +10,7 @@
   "dependencies": {
     "fast-xml-parser": "^5.9.1",
     "node-sqlite3-wasm": "^0.8.58",
+    "tree-sitter-wasms": "^0.1.13",
     "vscode-languageserver": "^9.0.1",
     "vscode-languageserver-textdocument": "^1.0.11",
     "web-tree-sitter": "^0.22.6"

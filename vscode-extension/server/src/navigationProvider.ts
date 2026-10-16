@@ -5,7 +5,8 @@ import {
   MarkupKind,
 } from 'vscode-languageserver';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { SymbolIndex, IndexedSymbol } from './symbolIndex';
+import { SymbolIndex } from './symbolIndex';
+import { LiveSymbolStore, LocatedSymbol } from './symbol';
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -17,6 +18,13 @@ import { SymbolIndex, IndexedSymbol } from './symbolIndex';
  */
 interface DocumentProvider {
   get(uri: string): TextDocument | undefined;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+/** Stable identity of a symbol occurrence, used to de-duplicate results. */
+function symbolKey(sym: LocatedSymbol): string {
+  return `${sym.file}:${sym.line}:${sym.column}`;
 }
 
 // ── NavigationProvider ───────────────────────────────────────────────────
@@ -36,9 +44,11 @@ interface DocumentProvider {
  */
 export class NavigationProvider {
   private readonly index: SymbolIndex;
+  private readonly live: LiveSymbolStore | undefined;
 
-  constructor(index: SymbolIndex) {
+  constructor(index: SymbolIndex, live?: LiveSymbolStore) {
     this.index = index;
+    this.live = live;
   }
 
   // ── Public API ────────────────────────────────────────────────────────
@@ -58,7 +68,7 @@ export class NavigationProvider {
     const word = this.getWordAtPosition(uri, position, documents);
     if (!word) return [];
 
-    const matches = await this.index.findByName(word);
+    const matches = await this.gatherMatches(word);
     if (matches.length === 0) return [];
 
     return matches.map((sym) => this.symbolToLocation(sym));
@@ -67,11 +77,12 @@ export class NavigationProvider {
   /**
    * Resolve `textDocument/references`.
    *
-   * Returns every indexed occurrence of the symbol under the cursor.
-   * Because the index stores definitions only (no usage tracking yet),
-   * this currently returns the same set as `getDefinition`.  A future
-   * slice will add cross-reference tracking so that call-sites,
-   * assignments, and include-directives are also captured.
+   * Returns every recorded occurrence of the symbol under the cursor —
+   * definition sites plus call sites, assignments and type references —
+   * from the usage index.  When usages have not been indexed yet (a file
+   * indexed by an older build, or one that only ctags could parse), it falls
+   * back to the definition sites so the feature still returns something
+   * useful instead of nothing.
    */
   async getReferences(
     uri: string,
@@ -81,7 +92,12 @@ export class NavigationProvider {
     const word = this.getWordAtPosition(uri, position, documents);
     if (!word) return [];
 
-    const matches = await this.index.findByName(word);
+    const usages = await this.index.findUsagesByName(word);
+    if (usages.length > 0) {
+      return usages.map((usage) => this.usageToLocation(usage));
+    }
+
+    const matches = await this.gatherMatches(word);
     return matches.map((sym) => this.symbolToLocation(sym));
   }
 
@@ -102,7 +118,7 @@ export class NavigationProvider {
     const word = this.getWordAtPosition(uri, position, documents);
     if (!word) return null;
 
-    const matches = await this.index.findByName(word);
+    const matches = await this.gatherMatches(word);
     if (matches.length === 0) return null;
 
     // Prefer the match that lives in the current file; fall back to the
@@ -128,6 +144,33 @@ export class NavigationProvider {
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────
+
+  /**
+   * Collect every known definition of `word`, preferring live (in-editor)
+   * symbols over persisted index entries and removing duplicates.
+   *
+   * A symbol is identified by file + line + column, so a live symbol whose
+   * position moved after an unsaved edit is reported alongside (not instead
+   * of) the stale index entry.
+   */
+  private async gatherMatches(word: string): Promise<LocatedSymbol[]> {
+    const liveMatches = (this.live?.all() ?? []).filter(
+      (s) => s.name === word,
+    );
+    const indexed = await this.index.findByName(word);
+
+    const merged: LocatedSymbol[] = [...liveMatches];
+    const seen = new Set(merged.map((s) => symbolKey(s)));
+
+    for (const sym of indexed) {
+      const key = symbolKey(sym);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(sym);
+    }
+
+    return merged;
+  }
 
   /**
    * Extract the identifier word under the cursor.
@@ -196,9 +239,9 @@ export class NavigationProvider {
   }
 
   /**
-   * Convert an IndexedSymbol to an LSP Location.
+   * Convert a symbol to an LSP Location.
    */
-  private symbolToLocation(sym: IndexedSymbol): Location {
+  private symbolToLocation(sym: LocatedSymbol): Location {
     return {
       uri: sym.file,
       range: {
@@ -209,11 +252,29 @@ export class NavigationProvider {
   }
 
   /**
+   * Convert an identifier occurrence to an LSP Location.
+   */
+  private usageToLocation(usage: {
+    name: string;
+    file: string;
+    line: number;
+    column: number;
+  }): Location {
+    return {
+      uri: usage.file,
+      range: {
+        start: { line: usage.line, character: usage.column },
+        end: { line: usage.line, character: usage.column + usage.name.length },
+      },
+    };
+  }
+
+  /**
    * Read the definition line from the document content (or `null` when the
    * document is not open).
    */
   private getDefinitionLine(
-    sym: IndexedSymbol,
+    sym: LocatedSymbol,
     documents: DocumentProvider,
   ): string | null {
     const doc = documents.get(sym.file);
@@ -230,8 +291,8 @@ export class NavigationProvider {
   /**
    * Map a symbol kind to a human-readable label.
    */
-  private kindToLabel(kind: IndexedSymbol['kind']): string {
-    const map: Record<IndexedSymbol['kind'], string> = {
+  private kindToLabel(kind: LocatedSymbol['kind']): string {
+    const map: Record<LocatedSymbol['kind'], string> = {
       function: 'Function',
       variable: 'Variable',
       type: 'Type',

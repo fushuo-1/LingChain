@@ -2,10 +2,10 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const CACHE_DIR = '.lingµchain';
+const CACHE_DIR = '.lingchain';
 
 /**
- * Add .lingµchain/ to .gitignore if not already present
+ * Add .lingchain/ to .gitignore if not already present
  */
 export async function addToGitignore(workspaceRoot?: string): Promise<boolean> {
   const root = workspaceRoot ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -39,7 +39,7 @@ export async function addToGitignore(workspaceRoot?: string): Promise<boolean> {
 }
 
 /**
- * Add .lingµchain to VS Code files.exclude setting
+ * Add .lingchain to VS Code files.exclude setting
  */
 export async function addToFilesExclude(): Promise<boolean> {
   const config = vscode.workspace.getConfiguration();

@@ -38,6 +38,9 @@ export class LineMap {
    * Sparse map: preprocessed line number -> original position.
    * Only directive lines are stored; intermediate lines are resolved by
    * computing the offset from the most recent directive.
+   *
+   * `preprocessedLine` records the line *after* the directive (per standard
+   * C semantics, `#line N "file"` means the NEXT line is file's line N).
    */
   private directives: Array<{ preprocessedLine: number; file: string; originalLine: number }> = [];
 
@@ -131,13 +134,25 @@ export class LineMap {
       directiveRe.lastIndex = 0;
       const m = directiveRe.exec(rawLine);
       if (m) {
+        // Standard semantics: the directive's NEXT line is `originalLine`.
         this.directives.push({
-          preprocessedLine: lineNum,
-          file: m[2],
+          preprocessedLine: lineNum + 1,
+          file: unescapeDirectivePath(m[2]),
           originalLine: parseInt(m[1], 10),
         });
       }
       lineNum++;
     }
   }
+}
+
+/**
+ * Undo the C string escaping compilers apply inside `#line` directives.
+ *
+ * ARM Compiler writes paths such as `C:\\Users\\me\\Inc\\util.h`; leaving the
+ * doubled separators in place produces file URIs like
+ * `file:///C://Users//me//Inc//util.h`, which no editor can resolve.
+ */
+export function unescapeDirectivePath(raw: string): string {
+  return raw.replace(/\\\\/g, '\\').replace(/\\"/g, '"');
 }

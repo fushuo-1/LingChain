@@ -9,23 +9,30 @@ import {
   HoverParams,
   DocumentSymbolParams,
   WorkspaceSymbolParams,
+  CompletionParams,
   Diagnostic as LspDiagnostic,
   DiagnosticSeverity as LspDiagnosticSeverity,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { Symbol } from './symbol';
+import * as fs from 'fs';
+import * as path from 'path';
+import { Symbol, LiveSymbolStore } from './symbol';
 import { TreeSitterExtractor } from './treeSitterExtractor';
 import { CtagsExtractor } from './ctagsExtractor';
-import { SymbolIndex } from './symbolIndex';
+import { SymbolIndex, projectDatabasePath, resolveProjectRoot } from './symbolIndex';
 import { BackgroundIndexer } from './backgroundIndexer';
 import { ProgressReporter } from './progressReporter';
 import { NavigationProvider } from './navigationProvider';
 import { SymbolListProvider } from './symbolListProvider';
+import { CompletionProvider } from './completionProvider';
+import { ArmclangPreprocessor } from './armclangPreprocessor';
 import {
   DiagnosticsProvider,
   Diagnostic as ArmclangDiagnostic,
 } from './diagnosticsProvider';
-import { CompileContext } from './keilProject';
+import { KeilProject, CompileContext } from './keilProject';
+import { locateArmclang } from './armclangLocator';
+import { fileUriToPath } from './fileUri';
 
 // ── Language server bootstrap ────────────────────────────────────────────
 
@@ -47,6 +54,9 @@ let navigationProvider: NavigationProvider | null = null;
 /** Symbol list provider – created once the symbol index is ready. */
 let symbolListProvider: SymbolListProvider | null = null;
 
+/** Completion provider – created once the symbol index is ready. */
+let completionProvider: CompletionProvider | null = null;
+
 /** Diagnostics provider – created once a compile context is available. */
 let diagnosticsProvider: DiagnosticsProvider | null = null;
 
@@ -56,7 +66,45 @@ const diagnosticsCache: Map<string, ArmclangDiagnostic[]> = new Map();
 /** Per-document symbol cache keyed by URI (legacy, kept for real-time edits). */
 const liveSymbolCache: Map<string, Symbol[]> = new Map();
 
-connection.onInitialize((_params: InitializeParams) => {
+/** Read-only view over the live symbol cache, handed to the providers. */
+let liveSymbols: LiveSymbolStore | null = null;
+
+/**
+ * Resolves once `onInitialized` has finished wiring up the index and
+ * providers.  Project selection must wait for it: the notification can
+ * arrive while the database and grammar are still loading, and acting on it
+ * then would silently index nothing.
+ */
+let whenReady: Promise<void> = Promise.resolve();
+let markReady: () => void = () => {};
+whenReady = new Promise<void>((resolve) => {
+  markReady = resolve;
+});
+
+// ── Path helpers ────────────────────────────────────────────────────────
+
+/**
+ * Convert a `file://` URI to a filesystem path (Windows drive letters
+ * included).  Non-file URIs are returned unchanged.
+ */
+export function uriToFilePath(uri: string): string {
+  return fileUriToPath(uri);
+}
+
+/**
+ * Wrap the live symbol cache in the read-only interface the providers
+ * consume.
+ */
+export function createLiveSymbolStore(
+  cache: Map<string, Symbol[]>,
+): LiveSymbolStore {
+  return {
+    get: (uri) => cache.get(uri),
+    all: () => [...cache.values()].flat(),
+  };
+}
+
+connection.onInitialize(() => {
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
@@ -65,32 +113,156 @@ connection.onInitialize((_params: InitializeParams) => {
       hoverProvider: true,
       documentSymbolProvider: true,
       workspaceSymbolProvider: true,
+      completionProvider: {},
     },
   };
 });
 
 connection.onInitialized(async () => {
-  connection.console.log('[server] LingµChain C language server initialised.');
+  try {
+    connection.console.log('[server] LingChain C language server initialised.');
 
-  // Initialise the persistent symbol index.
-  symbolIndex = new SymbolIndex('.lingmupchain/symbols.db');
-  await symbolIndex.init();
+    // Load the C grammar once up front so symbol extraction uses tree-sitter
+    // rather than quietly falling back to the regex heuristic.
+    await treeSitterExtractor.initialize();
+    if (!treeSitterExtractor.isReady) {
+      connection.console.warn(
+        `[server] tree-sitter unavailable (${treeSitterExtractor.lastInitError ?? 'unknown reason'}) – falling back to regex symbol extraction.`,
+      );
+    } else {
+      connection.console.log('[server] tree-sitter C grammar loaded.');
+    }
 
-  // Wire up the background indexer.
-  const reporter = new ProgressReporter(connection);
-  backgroundIndexer = new BackgroundIndexer(
-    symbolIndex,
-    treeSitterExtractor,
-    ctagsExtractor,
-    reporter,
-  );
+    // Until a project is selected the index is an in-memory placeholder.
+    // Putting a file here instead would leave a stray `.lingchain/` in the
+    // workspace root, separate from the project's own cache (see
+    // `projectDatabasePath`).  Selecting a project reopens the index on that
+    // project's file.
+    symbolIndex = new SymbolIndex(':memory:');
+    await symbolIndex.init();
 
-  // Wire up the navigation provider.
-  navigationProvider = new NavigationProvider(symbolIndex);
+    // Live symbols (open documents, including unsaved edits) take precedence
+    // over the persisted index in every provider.
+    liveSymbols = createLiveSymbolStore(liveSymbolCache);
 
-  // Wire up the symbol list provider.
-  symbolListProvider = new SymbolListProvider(symbolIndex);
+    // Wire up the background indexer.
+    const reporter = new ProgressReporter(connection);
+    backgroundIndexer = new BackgroundIndexer(
+      symbolIndex,
+      treeSitterExtractor,
+      ctagsExtractor,
+      reporter,
+    );
+
+    // Wire up the navigation provider.
+    navigationProvider = new NavigationProvider(symbolIndex, liveSymbols);
+
+    // Wire up the symbol list provider.
+    symbolListProvider = new SymbolListProvider(symbolIndex, liveSymbols);
+
+    // Wire up the completion provider.
+    completionProvider = new CompletionProvider(symbolIndex, liveSymbols);
+  } finally {
+    markReady();
+  }
 });
+
+// Releasing the index on shutdown drops its file lock.  Without this the
+// `.lock` directory would be left to the next start, which recovers by
+// removing it (see `removeStaleLock`).
+connection.onShutdown(async () => {
+  await symbolIndex?.close();
+});
+
+// ── Project selection ──────────────────────────────────────────────────
+
+/**
+ * Handle the client's `lingchain/selectProject` notification.
+ *
+ * Loads the selected Keil project, starts background indexing of its source
+ * files, and initialises the diagnostics provider.  armclang is discovered
+ * on PATH (the client may later send an explicit path).
+ */
+connection.onNotification(
+  'lingchain/selectProject',
+  async (params: { projectPath: string; armclangPath?: string }) => {
+    // Wait until the index and providers exist: this notification can arrive
+    // while `onInitialized` is still loading the grammar and database.
+    await whenReady;
+
+    const projectPath = params?.projectPath;
+    if (!projectPath) return;
+    connection.console.log(
+      `[server] Active Keil project selected: ${projectPath}`,
+    );
+
+    try {
+      const project = new KeilProject(projectPath);
+      project.parse();
+      const compileContext = project.getCompileContext();
+
+      // Switch the index to this project's own database before indexing, so
+      // switching projects never mixes their symbols.  The cache lives next
+      // to the project's sources, under `<project root>/.lingchain/`.
+      if (symbolIndex) {
+        const projectRoot = resolveProjectRoot(
+          projectPath,
+          compileContext.sourceFiles,
+        );
+        const dbPath = projectDatabasePath(projectRoot, projectPath);
+        fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+        await symbolIndex.reopen(dbPath);
+        connection.console.log(`[server] project root: ${projectRoot}`);
+        connection.console.log(`[server] index database: ${dbPath}`);
+      }
+
+      // Locate armclang: an explicit client setting wins, otherwise probe
+      // environment variables, the Keil registry, common install paths and
+      // finally PATH.  Without it both preprocessing and diagnostics are
+      // disabled rather than silently failing per file.
+      const armclang = locateArmclang(params?.armclangPath);
+      if (armclang) {
+        connection.console.log(
+          `[server] armclang resolved from ${armclang.source}: ${armclang.path}`,
+        );
+      } else {
+        connection.console.warn(
+          '[server] armclang not found – preprocessing and diagnostics disabled. ' +
+            'Set lingchain.armclang.path, KEIL_ARMCLANG, or install Keil MDK.',
+        );
+      }
+
+      // Enable armclang -E preprocessing for the background indexer now
+      // that a compile context is available.  Positions in the preprocessed
+      // output are mapped back to the original source via the LineMap;
+      // indexing falls back to direct parsing when armclang is unavailable.
+      if (backgroundIndexer) {
+        backgroundIndexer.setPreprocessor(
+          armclang
+            ? new ArmclangPreprocessor(armclang.path, compileContext)
+            : null,
+        );
+      }
+
+      if (compileContext.sourceFiles.length > 0) {
+        startIndexingForProject(compileContext.sourceFiles);
+      } else {
+        connection.console.warn(
+          `[server] No source files found in project ${projectPath}.`,
+        );
+      }
+
+      // Phase 2 – ground-truth diagnostics from the target toolchain.
+      if (armclang) {
+        initializeDiagnostics(armclang.path, compileContext);
+      }
+    } catch (err) {
+      connection.console.error(
+        `[server] Failed to load project ${projectPath}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  },
+);
 
 /**
  * Trigger background indexing for the given list of source files.
@@ -200,6 +372,10 @@ async function extractForDocument(doc: TextDocument): Promise<void> {
   const uri = doc.uri;
   const content = doc.getText();
 
+  // Make sure the WASM grammar is loaded before extracting; otherwise the
+  // extractor silently degrades to the regex heuristic.
+  await treeSitterExtractor.initialize();
+
   // Step 1 – tree-sitter (or regex fallback inside the extractor).
   let symbols = treeSitterExtractor.extractSymbols(content, uri);
 
@@ -209,11 +385,7 @@ async function extractForDocument(doc: TextDocument): Promise<void> {
       `[server] tree-sitter produced 0 symbols for ${uri}; trying ctags…`,
     );
     try {
-      // ctags needs a file path; convert URI → filesystem path.
-      const filePath = uri.startsWith('file://')
-        ? decodeURIComponent(uri.slice(7)).replace(/^\/([A-Z]:)/, '$1') // Windows drive letter fix
-        : uri;
-      symbols = await ctagsExtractor.extractSymbols(filePath);
+      symbols = await ctagsExtractor.extractSymbols(uriToFilePath(uri));
     } catch (err) {
       connection.console.warn(
         `[server] ctags fallback failed for ${uri}: ${err}`,
@@ -260,11 +432,20 @@ documents.onDidClose((event) => {
 // Note: onDidSave requires the client to send textDocument/didSave notifications.
 // The VS Code client sends these when the document is saved.
 documents.onDidSave?.((event) => {
-  if (!diagnosticsProvider) return;
   const uri = event.document.uri;
-  const filePath = uri.startsWith('file://')
-    ? decodeURIComponent(uri.slice(7)).replace(/^\/([A-Z]:)/, '$1')
-    : uri;
+  const filePath = uriToFilePath(uri);
+
+  // Keep the persisted index in step with what is on disk, so navigation and
+  // completion survive a restart without a full re-index.
+  if (backgroundIndexer) {
+    backgroundIndexer.indexFile(filePath).catch((err) => {
+      connection.console.warn(
+        `[server] Incremental indexing failed for ${uri}: ${err instanceof Error ? err.message : err}`,
+      );
+    });
+  }
+
+  if (!diagnosticsProvider) return;
   publishDiagnosticsForFile(filePath, uri).catch((err) => {
     connection.console.error(
       `[server] publishDiagnosticsForFile failed: ${err instanceof Error ? err.message : err}`,
@@ -301,6 +482,17 @@ connection.onHover((params: HoverParams) => {
   );
 });
 
+// ── Completion handler ─────────────────────────────────────────────────
+
+connection.onCompletion((params: CompletionParams) => {
+  if (!completionProvider) return [];
+  return completionProvider.getCompletion(
+    params.textDocument.uri,
+    params.position,
+    documents,
+  );
+});
+
 // ── Symbol list handlers ────────────────────────────────────────────────
 
 connection.onDocumentSymbol((params: DocumentSymbolParams) => {
@@ -331,4 +523,5 @@ export {
   diagnosticsProvider,
   navigationProvider,
   symbolListProvider,
+  completionProvider,
 };

@@ -42,7 +42,7 @@ export async function promptProjectSelection(): Promise<vscode.Uri | undefined> 
 
   if (projects.length === 0) {
     vscode.window.showWarningMessage(
-      'LingµChain: No .uvprojx files found in the workspace.'
+      'LingChain: No .uvprojx files found in the workspace.'
     );
     return undefined;
   }

@@ -6,7 +6,7 @@ import {
 } from 'vscode-languageserver';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { SymbolIndex, IndexedSymbol } from './symbolIndex';
-import { Symbol } from './symbol';
+import { Symbol, LiveSymbolStore, LocatedSymbol } from './symbol';
 
 // ── CompletionProvider ───────────────────────────────────────────────────
 
@@ -20,12 +20,17 @@ import { Symbol } from './symbol';
  * Completion triggers on identifier characters: letters, digits, and
  * underscores.  The prefix is extracted by scanning backwards from the
  * cursor position until a non-identifier character is hit.
+ *
+ * Symbols extracted from open documents (`LiveSymbolStore`) are merged with
+ * the persisted index so that code typed but not yet saved still completes.
  */
 export class CompletionProvider {
   private readonly index: SymbolIndex;
+  private readonly live: LiveSymbolStore | undefined;
 
-  constructor(index: SymbolIndex) {
+  constructor(index: SymbolIndex, live?: LiveSymbolStore) {
     this.index = index;
+    this.live = live;
   }
 
   // ── Public API ────────────────────────────────────────────────────────
@@ -56,13 +61,17 @@ export class CompletionProvider {
     if (prefix.length === 0) return [];
 
     const matches = await this.index.findByPrefix(prefix);
+    const liveMatches = (this.live?.all() ?? []).filter((s) =>
+      s.name.startsWith(prefix),
+    );
 
     // Deduplicate by name — multiple definitions with the same name
-    // should appear only once in the completion list.
+    // should appear only once in the completion list.  Live symbols come
+    // first because they reflect the current editor state.
     const seen = new Set<string>();
     const items: CompletionItem[] = [];
 
-    for (const sym of matches) {
+    for (const sym of [...liveMatches, ...matches]) {
       if (seen.has(sym.name)) continue;
       seen.add(sym.name);
       items.push(this.symbolToCompletionItem(sym));
@@ -105,11 +114,11 @@ export class CompletionProvider {
   }
 
   /**
-   * Convert an IndexedSymbol to an LSP CompletionItem.
+   * Convert a symbol to an LSP CompletionItem.
    *
    * Maps the internal symbol kind to the appropriate `CompletionItemKind`.
    */
-  private symbolToCompletionItem(sym: IndexedSymbol): CompletionItem {
+  private symbolToCompletionItem(sym: LocatedSymbol): CompletionItem {
     return {
       label: sym.name,
       kind: this.mapKind(sym.kind),

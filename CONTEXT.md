@@ -1,4 +1,4 @@
-# LingµChain — Context
+# LingChain — Context
 
 ## Project
 

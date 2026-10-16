@@ -183,15 +183,22 @@ export class KeilProject {
   }
 
   /**
-   * Extract source files from the project Groups and Files tree.
+   * Extract source files from the project's Groups/Files tree.
    *
    * Keil stores file references as:
-   *   <Project><Groups><Group>
-   *     <Files><File><FileName>main.c</FileName><FilePath>.\Src\main.c</FilePath>
+   *   <Groups><Group>
+   *     <Files><File><FileName>main.c</FileName><FilePath>../Core/Src/main.c</FilePath>
+   *
+   * The `<Groups>` element lives inside each `<Target>` in CubeMX-generated
+   * projects (so the file list can differ per target), but directly under
+   * `<Project>` in hand-written ones.  Both layouts are accepted, preferring
+   * the selected target's own list.
    */
   private extractSourceFiles(target: Record<string, any>): string[] {
     const files: Set<string> = new Set();
-    const groups = this.doc!['Project']?.['Groups']?.['Group'];
+    const groups =
+      target?.['Groups']?.['Group'] ??
+      this.doc!['Project']?.['Groups']?.['Group'];
 
     if (!groups) {
       return [];
@@ -209,9 +216,9 @@ export class KeilProject {
       for (const file of fileArray) {
         const filePath = file?.['FilePath'] as string | undefined;
         if (filePath) {
-          // Keil uses .\ relative to the project dir
-          const cleaned = filePath.replace(/^\.\\/, '').replace(/^\.?\//, '');
-          files.add(path.resolve(this.projectDir, cleaned));
+          // Keil uses paths relative to the project directory (`..\Core\Src\main.c`,
+          // `.\Src\main.c` or `Src/main.c`); path.resolve normalises them all.
+          files.add(path.resolve(this.projectDir, filePath));
         }
       }
     }

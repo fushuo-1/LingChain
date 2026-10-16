@@ -239,12 +239,11 @@ describe('DiagnosticsProvider — edge cases', () => {
 // ---------------------------------------------------------------------------
 
 describe('DiagnosticsProvider — buildArgs', () => {
-  it('should produce correct armclang -c arguments', () => {
+  it('should request syntax-only checking without unsupported flags', () => {
     const provider = new DiagnosticsProvider('armclang', COMPILE_CONTEXT);
     const args = provider.buildArgs('/project/Src/main.c');
 
-    expect(args).toContain('-c');
-    expect(args).toContain('--format=json');
+    expect(args).toContain('-fsyntax-only');
     expect(args).toContain('-I');
     expect(args).toContain('/project/Core/Inc');
     expect(args).toContain('/project/Drivers/CMSIS/Include');
@@ -253,17 +252,35 @@ describe('DiagnosticsProvider — buildArgs', () => {
     expect(args).toContain('/project/Src/main.c');
   });
 
-  it('should place -c and --format=json before include paths', () => {
+  it('should not pass options armclang rejects', () => {
     const provider = new DiagnosticsProvider('armclang', COMPILE_CONTEXT);
     const args = provider.buildArgs('/project/Src/main.c');
 
-    const cIdx = args.indexOf('-c');
-    const jsonIdx = args.indexOf('--format=json');
+    // `--format=json` makes armclang exit with "unknown argument", which used
+    // to silently produce zero diagnostics.
+    expect(args).not.toContain('--format=json');
+    // `-c` would write an object file next to the user's sources.
+    expect(args).not.toContain('-c');
+    expect(args).not.toContain('-o');
+  });
+
+  it('should select the target device with --target and -mcpu', () => {
+    const provider = new DiagnosticsProvider('armclang', COMPILE_CONTEXT);
+    const args = provider.buildArgs('/project/Src/main.c');
+
+    expect(args).toContain('--target=arm-arm-none-eabi');
+    expect(args).toContain('-mcpu=cortex-m0plus');
+  });
+
+  it('should place the mode flags before include paths', () => {
+    const provider = new DiagnosticsProvider('armclang', COMPILE_CONTEXT);
+    const args = provider.buildArgs('/project/Src/main.c');
+
     const firstIIdx = args.indexOf('-I');
 
-    expect(cIdx).toBe(0);
-    expect(jsonIdx).toBe(1);
-    expect(firstIIdx).toBe(2);
+    expect(args[0]).toBe('-fsyntax-only');
+    expect(args).toContain('--target=arm-arm-none-eabi');
+    expect(firstIIdx).toBeGreaterThan(0);
   });
 
   it('should handle empty compile context', () => {
@@ -276,7 +293,12 @@ describe('DiagnosticsProvider — buildArgs', () => {
     const provider = new DiagnosticsProvider('armclang', emptyCtx);
     const args = provider.buildArgs('test.c');
 
-    expect(args).toEqual(['-c', '--format=json', 'test.c']);
+    // No device name means no -mcpu, but --target is always required.
+    expect(args).toEqual([
+      '-fsyntax-only',
+      '--target=arm-arm-none-eabi',
+      'test.c',
+    ]);
   });
 });
 

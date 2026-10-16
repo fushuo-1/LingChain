@@ -17,4 +17,13 @@ tsconfig.tsbuildinfo
 .gitignore
 .github/**
 *.vsix
-.lingµchain/
+.lingchain/
+
+# The bundled server lives inside the package on purpose.
+!server/**
+!server/node_modules/**
+!server/out/**
+
+# The extension client itself is bundled into out/extension.js by
+# scripts/bundle-extension.js, so no node_modules ships with it.
+jest.config.js

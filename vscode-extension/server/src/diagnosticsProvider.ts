@@ -1,9 +1,12 @@
 /**
  * armclang diagnostics provider.
  *
- * Runs `armclang -c` against a source file using the compile context
- * extracted from a Keil project, then parses the JSON diagnostics output
- * into LSP-compatible Diagnostic objects.
+ * Runs `armclang -fsyntax-only` against a source file using the compile
+ * context extracted from a Keil project, then parses the diagnostics into
+ * LSP-compatible Diagnostic objects.
+ *
+ * `-fsyntax-only` is used instead of `-c` so the compiler never writes an
+ * object file into the user's source tree.
  *
  * Invocations are debounced so that rapid save sequences do not flood the
  * compiler.
@@ -12,6 +15,7 @@
 import { execFile, ExecFileException } from 'child_process';
 import * as path from 'path';
 import { CompileContext } from './keilProject';
+import { armclangTargetFlags } from './armclangArgs';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -147,17 +151,25 @@ export class DiagnosticsProvider {
   // -- Internal ---------------------------------------------------------------
 
   /**
-   * Build the argument list for `armclang -c --format=json`.
+   * Build the argument list for `armclang -fsyntax-only`.
    *
    * Includes:
-   *   - `-c`              : compile only (no link)
-   *   - `--format=json`   : emit diagnostics as JSON
+   *   - `-fsyntax-only`   : parse and check only, write no output file
+   *   - target flags      : `--target` (and `-mcpu` when known)
    *   - `-I <dir>`        : one per include path
    *   - `-D <macro>`      : one per define
    *   - The source file itself
+   *
+   * Note: Arm Compiler for Embedded 6.x has no JSON diagnostics option —
+   * `--format=json` is rejected as an unknown argument, which used to make
+   * every diagnostics run fail silently.  The text format it does emit is
+   * handled by `parseTextOutput`.
    */
   buildArgs(filePath: string): string[] {
-    const args: string[] = ['-c', '--format=json'];
+    const args: string[] = [
+      '-fsyntax-only',
+      ...armclangTargetFlags(this.compileContext.target),
+    ];
 
     for (const inc of this.compileContext.includePaths) {
       args.push('-I', inc);
@@ -173,11 +185,11 @@ export class DiagnosticsProvider {
   }
 
   /**
-   * Spawn armclang and return stderr (where JSON diagnostics are emitted).
+   * Spawn armclang and return its diagnostics output.
    *
-   * armclang writes diagnostics to stderr even on success (exit 0).
-   * On compile errors it still exits non-zero; we capture stderr in both
-   * cases.
+   * armclang writes diagnostics to stderr, but which stream carries them has
+   * varied between releases, so both are concatenated before parsing — the
+   * parser only reacts to lines that match a diagnostic.
    */
   private runArmclang(filePath: string, args: string[]): Promise<string> {
     return new Promise<string>((resolve, reject) => {
@@ -188,7 +200,7 @@ export class DiagnosticsProvider {
         (error: ExecFileException | null, stdout: string, stderr: string) => {
           // armclang may exit non-zero for compile errors — that is expected.
           // We only reject on spawn failures (ENOENT, etc.).
-          if (error && !stderr) {
+          if (error && !stderr && !stdout) {
             reject(
               new Error(
                 `armclang invocation failed (exit ${error.code ?? 'unknown'}): ${error.message}`
@@ -196,8 +208,7 @@ export class DiagnosticsProvider {
             );
             return;
           }
-          // Diagnostics are on stderr when using --format=json.
-          resolve(stderr || stdout);
+          resolve(`${stdout ?? ''}\n${stderr ?? ''}`);
         },
       );
     });
@@ -206,8 +217,8 @@ export class DiagnosticsProvider {
   /**
    * Parse armclang diagnostics output into our Diagnostic[] format.
    *
-   * Tries JSON first, falls back to text-based parsing for older armclang
-   * versions that lack `--format=json` support.
+   * Tries JSON first (some toolchain builds emit it), then falls back to the
+   * text format Arm Compiler for Embedded 6.x actually produces.
    */
   parseOutput(raw: string, _sourceFile: string): Diagnostic[] {
     if (!raw || raw.trim().length === 0) {

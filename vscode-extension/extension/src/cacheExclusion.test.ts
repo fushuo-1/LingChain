@@ -27,7 +27,7 @@ describe('addToGitignore', () => {
     const modified = await addToGitignore(tmpDir);
     expect(modified).toBe(true);
     const content = fs.readFileSync(path.join(tmpDir, '.gitignore'), 'utf-8');
-    expect(content).toContain('.lingµchain/');
+    expect(content).toContain('.lingchain/');
   });
 
   it('appends entry to existing .gitignore', async () => {
@@ -35,17 +35,17 @@ describe('addToGitignore', () => {
     const modified = await addToGitignore(tmpDir);
     expect(modified).toBe(true);
     const content = fs.readFileSync(path.join(tmpDir, '.gitignore'), 'utf-8');
-    expect(content).toContain('.lingµchain/');
+    expect(content).toContain('.lingchain/');
   });
 
   it('does NOT modify when entry exists (exact)', async () => {
-    fs.writeFileSync(path.join(tmpDir, '.gitignore'), '.lingµchain\n', 'utf-8');
+    fs.writeFileSync(path.join(tmpDir, '.gitignore'), '.lingchain\n', 'utf-8');
     const modified = await addToGitignore(tmpDir);
     expect(modified).toBe(false);
   });
 
   it('does NOT modify when entry exists (with slash)', async () => {
-    fs.writeFileSync(path.join(tmpDir, '.gitignore'), '.lingµchain/\n', 'utf-8');
+    fs.writeFileSync(path.join(tmpDir, '.gitignore'), '.lingchain/\n', 'utf-8');
     const modified = await addToGitignore(tmpDir);
     expect(modified).toBe(false);
   });
@@ -55,20 +55,20 @@ describe('addToGitignore', () => {
     const modified = await addToGitignore(tmpDir);
     expect(modified).toBe(false);
     const content = fs.readFileSync(path.join(tmpDir, '.gitignore'), 'utf-8');
-    const matches = content.match(/\.lingµchain\//g);
+    const matches = content.match(/\.lingchain\//g);
     expect(matches).toHaveLength(1);
   });
 });
 
 describe('addToFilesExclude', () => {
-  it('adds .lingµchain to files.exclude when not present', async () => {
+  it('adds .lingchain to files.exclude when not present', async () => {
     const modified = await addToFilesExclude();
     expect(modified).toBe(true);
-    expect(mockUpdate).toHaveBeenCalledWith('files.exclude', { '.lingµchain': true }, 2);
+    expect(mockUpdate).toHaveBeenCalledWith('files.exclude', { '.lingchain': true }, 2);
   });
 
   it('does NOT modify when already present', async () => {
-    mockGet.mockReturnValue({ '.lingµchain': true });
+    mockGet.mockReturnValue({ '.lingchain': true });
     const modified = await addToFilesExclude();
     expect(modified).toBe(false);
     expect(mockUpdate).not.toHaveBeenCalled();
@@ -80,14 +80,14 @@ describe('addToFilesExclude', () => {
     expect(modified).toBe(true);
     expect(mockUpdate).toHaveBeenCalledWith(
       'files.exclude',
-      { 'node_modules': true, '.lingµchain': true },
+      { 'node_modules': true, '.lingchain': true },
       2
     );
   });
 
   it('is idempotent', async () => {
     mockGet.mockReturnValueOnce({});
-    mockGet.mockReturnValueOnce({ '.lingµchain': true });
+    mockGet.mockReturnValueOnce({ '.lingchain': true });
     const first = await addToFilesExclude();
     expect(first).toBe(true);
     const second = await addToFilesExclude();
@@ -99,7 +99,7 @@ describe('ensureCacheExclusion', () => {
   it('calls both addToGitignore and addToFilesExclude', async () => {
     await ensureCacheExclusion(tmpDir);
     const content = fs.readFileSync(path.join(tmpDir, '.gitignore'), 'utf-8');
-    expect(content).toContain('.lingµchain/');
+    expect(content).toContain('.lingchain/');
     expect(mockUpdate).toHaveBeenCalled();
   });
 });

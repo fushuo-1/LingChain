@@ -3,6 +3,8 @@ import { SymbolIndex } from './symbolIndex';
 import { hashContent } from './fileHasher';
 import { TreeSitterExtractor } from './treeSitterExtractor';
 import { CtagsExtractor } from './ctagsExtractor';
+import { ArmclangPreprocessor } from './armclangPreprocessor';
+import { LineMap } from './lineMap';
 import { ProgressReporter } from './progressReporter';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -56,6 +58,7 @@ describe('BackgroundIndexer', () => {
   });
 
   afterEach(async () => {
+    jest.restoreAllMocks();
     await index.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -225,5 +228,275 @@ describe('BackgroundIndexer', () => {
     // Should still report start and completion.
     expect(mockConn.logs.length).toBeGreaterThanOrEqual(2);
     expect(mockConn.logs[mockConn.logs.length - 1]).toContain('0 indexed');
+  });
+
+  // ── 8. Preprocessing integration ────────────────────────────────────
+
+  it('should preprocess via armclang and map positions back to the original source', async () => {
+    const srcC = writeSourceFile(tmpDir, 'main.c', 'int main(void) { return 0; }\n');
+    const uri = `file:///${srcC.replace(/\\/g, '/')}`;
+
+    // Preprocessed output.  The directive `# 5 "main.c"` on line 5 means its
+    // NEXT line (6) is main.c:5.
+    const preprocessed = [
+      '# 1 "main.c"',
+      'int main(void) {',
+      '  return 0;',
+      '}',
+      '# 5 "main.c"',
+      'void helper(void) {}',
+    ].join('\n');
+
+    const fakePre = {
+      preprocessFile: jest.fn().mockResolvedValue({
+        originalUri: srcC,
+        preprocessedContent: preprocessed,
+        lineMap: new LineMap(preprocessed),
+      }),
+    } as unknown as ArmclangPreprocessor;
+
+    const indexer = new BackgroundIndexer(
+      index,
+      extractor,
+      ctagsExtractor,
+      reporter,
+      fakePre,
+    );
+
+    // The extractor reports a symbol at preprocessed line 6 (0-based index 5).
+    const spy = jest.spyOn(extractor, 'extractSymbols').mockReturnValue([
+      { name: 'helper', kind: 'function', file: uri, line: 5, column: 0 },
+    ]);
+
+    expect(await indexer.indexFile(srcC)).toBe(true);
+
+    const symbols = await index.findByFile(uri);
+    expect(symbols).toHaveLength(1);
+    expect(symbols[0].name).toBe('helper');
+    // Pre line 6 -> main.c:5 (1-based) -> stored 0-based line 4.
+    expect(symbols[0].line).toBe(4);
+    expect(spy).toHaveBeenCalledWith(preprocessed, uri);
+  });
+
+  it('should fall back to direct parsing when preprocessing fails', async () => {
+    const srcC = writeSourceFile(tmpDir, 'main.c', 'int main(void) { return 0; }\n');
+    const uri = `file:///${srcC.replace(/\\/g, '/')}`;
+
+    const fakePre = {
+      preprocessFile: jest
+        .fn()
+        .mockRejectedValue(new Error('armclang not found')),
+    } as unknown as ArmclangPreprocessor;
+
+    const indexer = new BackgroundIndexer(
+      index,
+      extractor,
+      ctagsExtractor,
+      reporter,
+      fakePre,
+    );
+
+    const spy = jest.spyOn(extractor, 'extractSymbols').mockReturnValue([
+      { name: 'main', kind: 'function', file: uri, line: 0, column: 0 },
+    ]);
+
+    expect(await indexer.indexFile(srcC)).toBe(true);
+
+    const symbols = await index.findByFile(uri);
+    expect(symbols).toHaveLength(1);
+    expect(symbols[0].name).toBe('main');
+    // Fallback parses the raw source content.
+    expect(spy).toHaveBeenCalledWith('int main(void) { return 0; }\n', uri);
+  });
+
+  it('should attempt preprocessing after setPreprocessor is called', async () => {
+    const srcC = writeSourceFile(tmpDir, 'main.c', 'int x;\n');
+    const uri = `file:///${srcC.replace(/\\/g, '/')}`;
+
+    const fakePre = {
+      preprocessFile: jest.fn().mockResolvedValue({
+        originalUri: srcC,
+        preprocessedContent: '# 1 "main.c"\nint y;\n',
+        lineMap: new LineMap('# 1 "main.c"\nint y;\n'),
+      }),
+    } as unknown as ArmclangPreprocessor;
+
+    const indexer = new BackgroundIndexer(index, extractor, ctagsExtractor, reporter);
+    jest.spyOn(extractor, 'extractSymbols').mockReturnValue([
+      { name: 'y', kind: 'variable', file: uri, line: 1, column: 0 },
+    ]);
+
+    indexer.setPreprocessor(fakePre);
+    expect(await indexer.indexFile(srcC)).toBe(true);
+    expect(fakePre.preprocessFile).toHaveBeenCalledWith(srcC);
+  });
+
+  // ── ctags fallback ───────────────────────────────────────────────
+
+  it('should fall back to ctags when tree-sitter finds nothing', async () => {
+    const srcC = writeSourceFile(tmpDir, 'main.c', '}\n');
+    const uri = `file:///${srcC.replace(/\\/g, '/')}`;
+
+    jest.spyOn(extractor, 'extractSymbols').mockReturnValue([]);
+    const ctagsSpy = jest.spyOn(ctagsExtractor, 'extractSymbols').mockResolvedValue([
+      { name: 'from_ctags', kind: 'function', file: srcC, line: 3, column: 0 },
+    ]);
+
+    const indexer = new BackgroundIndexer(
+      index,
+      extractor,
+      ctagsExtractor,
+      reporter,
+    );
+    await indexer.indexFile(srcC);
+
+    expect(ctagsSpy).toHaveBeenCalledWith(srcC);
+
+    // Symbols resolved by ctags must be re-keyed to the workspace URI.
+    const symbols = await index.findByFile(uri);
+    expect(symbols.map((s) => s.name)).toEqual(['from_ctags']);
+    expect(symbols[0].file).toBe(uri);
+  });
+
+  it('should not invoke ctags when tree-sitter produced symbols', async () => {
+    const srcC = writeSourceFile(tmpDir, 'main.c', 'int main(void) { return 0; }\n');
+
+    const ctagsSpy = jest.spyOn(ctagsExtractor, 'extractSymbols');
+    const indexer = new BackgroundIndexer(
+      index,
+      extractor,
+      ctagsExtractor,
+      reporter,
+    );
+    await indexer.indexFile(srcC);
+
+    expect(ctagsSpy).not.toHaveBeenCalled();
+  });
+
+  // ── usage indexing ───────────────────────────────────────────────
+
+  it('should index identifier usages alongside symbols', async () => {
+    const srcC = writeSourceFile(
+      tmpDir,
+      'main.c',
+      ['int helper(void) { return 1; }', 'int main(void) { return helper(); }'].join('\n'),
+    );
+
+    const indexer = new BackgroundIndexer(
+      index,
+      extractor,
+      ctagsExtractor,
+      reporter,
+    );
+    await indexer.indexFile(srcC);
+
+    const usages = await index.findUsagesByName('helper');
+
+    // The definition and the call site.
+    expect(usages.length).toBeGreaterThanOrEqual(2);
+    expect(usages.map((u) => u.line)).toEqual([...usages.map((u) => u.line)].sort((a, b) => a - b));
+  });
+
+  it('should drop stale usages when a file is re-indexed', async () => {
+    const first = writeSourceFile(tmpDir, 'main.c', 'int gone(void) { return 0; }\n');
+    const indexer = new BackgroundIndexer(
+      index,
+      extractor,
+      ctagsExtractor,
+      reporter,
+    );
+    await indexer.indexFile(first);
+    expect(await index.findUsagesByName('gone')).not.toEqual([]);
+
+    // Rewrite the file; the old identifier must disappear from the index.
+    fs.writeFileSync(first, 'int present(void) { return 0; }\n', 'utf-8');
+    await indexer.indexFile(first);
+
+    expect(await index.findUsagesByName('gone')).toEqual([]);
+    expect(await index.findUsagesByName('present')).not.toEqual([]);
+  });
+
+  // ── header attribution (armclang -E output) ──────────────────────
+
+  /**
+   * A translation unit whose preprocessed output declares a symbol inside an
+   * included header; the symbol is attributed to that header, which has no
+   * `files` row of its own until the indexer creates one.
+   */
+  function headerAttributionFixture() {
+    const headerPath = path.join(tmpDir, 'Inc', 'util.h');
+    fs.mkdirSync(path.dirname(headerPath), { recursive: true });
+    fs.writeFileSync(headerPath, 'int util_add(int a, int b);\n', 'utf-8');
+
+    const srcC = writeSourceFile(
+      tmpDir,
+      'main.c',
+      '#include "util.h"\nint main(void) { return 0; }\n',
+    );
+
+    // armclang escapes the backslashes in #line paths.
+    const preprocessed = [
+      '# 1 "main.c"',
+      'int main(void) { return 0; }',
+      `# 3 "${headerPath.replace(/\\/g, '\\\\')}"`,
+      'int util_add(int a, int b);',
+    ].join('\n');
+
+    const preprocessor = {
+      preprocessFile: jest.fn().mockResolvedValue({
+        originalUri: srcC,
+        preprocessedContent: preprocessed,
+        lineMap: new LineMap(preprocessed),
+      }),
+    } as unknown as ArmclangPreprocessor;
+
+    jest.spyOn(extractor, 'extractSymbols').mockReturnValue([
+      { name: 'main', kind: 'function', file: 'file:///placeholder', line: 1, column: 0 },
+      { name: 'util_add', kind: 'function', file: 'file:///placeholder', line: 3, column: 4 },
+    ]);
+
+    return { srcC, headerPath, preprocessor };
+  }
+
+  it('should index symbols attributed to an included header', async () => {
+    const { srcC, headerPath, preprocessor } = headerAttributionFixture();
+    const headerUri = `file:///${headerPath.replace(/\\/g, '/')}`;
+
+    const indexer = new BackgroundIndexer(
+      index,
+      extractor,
+      ctagsExtractor,
+      reporter,
+    );
+    indexer.setPreprocessor(preprocessor);
+
+    // Must not fail the foreign key on the never-indexed header.
+    await expect(indexer.indexFile(srcC)).resolves.toBe(true);
+
+    const headerSymbols = await index.findByFile(headerUri);
+    expect(headerSymbols.map((s) => s.name)).toEqual(['util_add']);
+    expect(headerSymbols[0].line).toBe(2); // 0-based line 3
+  });
+
+  it('should not accumulate header symbols across re-indexes', async () => {
+    const { srcC, headerPath, preprocessor } = headerAttributionFixture();
+    const headerUri = `file:///${headerPath.replace(/\\/g, '/')}`;
+
+    const indexer = new BackgroundIndexer(
+      index,
+      extractor,
+      ctagsExtractor,
+      reporter,
+    );
+    indexer.setPreprocessor(preprocessor);
+
+    await indexer.indexFile(srcC);
+
+    // Change the source so the file is re-indexed, then check for duplicates:
+    // the rows attributed to util.h must be replaced, not appended to.
+    fs.writeFileSync(srcC, '#include "util.h"\nint main(void) { return 1; }\n', 'utf-8');
+    await indexer.indexFile(srcC);
+
+    expect(await index.findByFile(headerUri)).toHaveLength(1);
   });
 });
